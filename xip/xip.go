@@ -24,7 +24,7 @@ var (
 	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 )
 
-func (xip *Xip) handleA(question dns.Question, response *dns.Msg) *dns.A {
+func (xip *Xip) handleA(question dns.Question) *dns.A {
 	fqdn := question.Name
 
 	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
@@ -83,12 +83,14 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 	for _, question := range message.Question {
 		switch question.Qtype {
 		case dns.TypeA:
-			record := xip.handleA(question, message)
-			if record != nil {
-				message.Answer = append(message.Answer, record)
-			} else {
+			record := xip.handleA(question)
+			if record == nil {
+				message.Rcode = dns.RcodeNameError
 				message.Ns = append(message.Ns, xip.SOARecord(question))
+				return
 			}
+
+			message.Answer = append(message.Answer, record)
 		}
 	}
 }
