@@ -38,7 +38,8 @@ func (xip *Xip) handleA(question dns.Question, response *dns.Msg) *dns.A {
 
 			resource := &dns.A{
 				Hdr: dns.RR_Header{
-					Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+					Ttl:    uint32((time.Second * 10).Seconds()),
 					Name:   fqdn,
 					Rrtype: dns.TypeA,
 					Class:  dns.ClassINET,
@@ -53,35 +54,43 @@ func (xip *Xip) handleA(question dns.Question, response *dns.Msg) *dns.A {
 	return nil
 }
 
-func (xip *Xip) handleQuery(message *dns.Msg) {
-	for _, question := range message.Question {
-		switch question.Qtype {
-		case dns.TypeA:
-			record := xip.handleA(question, message)
-			message.Answer = append(message.Answer, record)
-		}
-	}
-}
-
-func (xip *Xip) refuseMessage(message *dns.Msg) {
-	message.MsgHdr.Rcode = dns.RcodeRefused
-
+func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
-		Name:     "my.local-ip.dev.",
-		Rrtype:   dns.TypeSOA,
-		Class:    dns.ClassINET,
-		Ttl:      uint32((time.Hour * 24 * 7).Seconds()),
+		Name:   question.Name,
+		Rrtype: dns.TypeSOA,
+		Class:  dns.ClassINET,
+		// Ttl:      uint32((time.Hour * 24 * 7).Seconds()),
+		Ttl:      uint32((time.Second * 10).Seconds()),
 		Rdlength: 0,
 	}
 	soa.Ns = "ns.local-ip.dev."
 	soa.Mbox = "admin.local-ip.dev."
 	soa.Serial = 2022102800
-	soa.Refresh = uint32((time.Minute * 15).Seconds())
-	soa.Retry = uint32((time.Minute * 15).Seconds())
-	soa.Expire = uint32((time.Minute * 30).Seconds())
-	soa.Minttl = uint32((time.Minute * 5).Seconds())
-	message.Ns = append(message.Ns, soa)
+	// soa.Refresh = uint32((time.Minute * 15).Seconds())
+	soa.Refresh = uint32((time.Second * 10).Seconds())
+	// soa.Retry = uint32((time.Minute * 15).Seconds())
+	soa.Retry = uint32((time.Second * 10).Seconds())
+	// soa.Expire = uint32((time.Minute * 30).Seconds())
+	soa.Expire = uint32((time.Second * 10).Seconds())
+	// soa.Minttl = uint32((time.Minute * 5).Seconds())
+	soa.Minttl = uint32((time.Second * 10).Seconds())
+
+	return soa
+}
+
+func (xip *Xip) handleQuery(message *dns.Msg) {
+	for _, question := range message.Question {
+		switch question.Qtype {
+		case dns.TypeA:
+			record := xip.handleA(question, message)
+			if record != nil {
+				message.Answer = append(message.Answer, record)
+			} else {
+				message.Ns = append(message.Ns, xip.SOARecord(question))
+			}
+		}
+	}
 }
 
 func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) {
@@ -96,7 +105,7 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 		case dns.OpcodeQuery:
 			xip.handleQuery(message)
 		default:
-			xip.refuseMessage(message)
+			message.MsgHdr.Rcode = dns.RcodeRefused
 		}
 
 		response.WriteMsg(message)

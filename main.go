@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	zone        = "my.local-ip.dev."
+	zone        = "local-ip.dev."
 	nameservers = "ns.local-ip.dev."
 )
 
