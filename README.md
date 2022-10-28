@@ -10,6 +10,10 @@ It was inspired by [local-ip.co](http://local-ip.co) and
 ```sh
 $ dig 10-0-1-29.my.local-ip.dev +short
 10.0.1.29
+$ dig app.10-0-1-29.my.local-ip.dev +short
+10.0.1.29
+$ dig foo.bar.10.0.1.29.my.local-ip.dev +short
+10.0.1.29
 $ dig 127.0.0.1.my.local-ip.dev +short
 127.0.0.1
 ```
