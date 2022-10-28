@@ -24,7 +24,7 @@ var (
 	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 )
 
-func (xip *Xip) handleA(question dns.Question) *dns.A {
+func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 
 	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
@@ -33,10 +33,12 @@ func (xip *Xip) handleA(question dns.Question) *dns.A {
 			match = strings.ReplaceAll(match, "-", ".")
 			ipV4Address := net.ParseIP(match).To4()
 			if ipV4Address == nil {
-				return nil
+				message.Rcode = dns.RcodeNameError
+				message.Ns = append(message.Ns, xip.SOARecord(question))
+				return
 			}
 
-			resource := &dns.A{
+			record := &dns.A{
 				Hdr: dns.RR_Header{
 					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 					Ttl:    uint32((time.Second * 10).Seconds()),
@@ -47,11 +49,9 @@ func (xip *Xip) handleA(question dns.Question) *dns.A {
 				A: ipV4Address,
 			}
 			log.Printf("(%s) %s => %s\n", flyRegion, fqdn, ipV4Address)
-			return resource
+			message.Answer = append(message.Answer, record)
 		}
 	}
-
-	return nil
 }
 
 func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
@@ -83,14 +83,7 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 	for _, question := range message.Question {
 		switch question.Qtype {
 		case dns.TypeA:
-			record := xip.handleA(question)
-			if record == nil {
-				message.Rcode = dns.RcodeNameError
-				message.Ns = append(message.Ns, xip.SOARecord(question))
-				return
-			}
-
-			message.Answer = append(message.Answer, record)
+			xip.handleA(question, message)
 		}
 	}
 }
