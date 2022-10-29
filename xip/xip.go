@@ -19,38 +19,87 @@ type Xip struct {
 }
 
 var (
-	flyRegion       = os.Getenv("FLY_REGION")
-	dottedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
-	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
+	flyRegion        = os.Getenv("FLY_REGION")
+	dottedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
+	dashedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
+	hardcodedDomains = map[string]net.IP{
+		"ns.local-ip.sh.":  net.IPv4(137, 66, 38, 214),
+		"ns1.local-ip.sh.": net.IPv4(137, 66, 38, 214),
+		"ns2.local-ip.sh.": net.IPv4(137, 66, 38, 214),
+	}
 )
+
+func (xip *Xip) fqdnToA(fqdn string) *dns.A {
+	var ipV4Address net.IP
+
+	if hardcodedDomains[strings.ToLower(fqdn)] != nil {
+		ipV4Address = hardcodedDomains[strings.ToLower(fqdn)]
+	} else {
+		for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
+			if ipV4RE.MatchString(fqdn) {
+				match := ipV4RE.FindStringSubmatch(fqdn)[1]
+				match = strings.ReplaceAll(match, "-", ".")
+				ipV4Address = net.ParseIP(match).To4()
+				break
+			}
+		}
+	}
+
+	if ipV4Address == nil {
+		return nil
+	}
+
+	return &dns.A{
+		Hdr: dns.RR_Header{
+			// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+			Ttl:    uint32((time.Second * 10).Seconds()),
+			Name:   fqdn,
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+		},
+		A: ipV4Address,
+	}
+}
 
 func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
+	record := xip.fqdnToA(fqdn)
 
-	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
-		if ipV4RE.MatchString(fqdn) {
-			match := ipV4RE.FindStringSubmatch(fqdn)[1]
-			match = strings.ReplaceAll(match, "-", ".")
-			ipV4Address := net.ParseIP(match).To4()
-			if ipV4Address == nil {
-				message.Rcode = dns.RcodeNameError
-				message.Ns = append(message.Ns, xip.SOARecord(question))
-				return
-			}
+	if record == nil {
+		message.Rcode = dns.RcodeNameError
+		message.Ns = append(message.Ns, xip.SOARecord(question))
+		return
+	}
 
-			record := &dns.A{
-				Hdr: dns.RR_Header{
-					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-					Ttl:    uint32((time.Second * 10).Seconds()),
-					Name:   fqdn,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-				},
-				A: ipV4Address,
-			}
-			log.Printf("(%s) %s => %s\n", flyRegion, fqdn, ipV4Address)
-			message.Answer = append(message.Answer, record)
-		}
+	log.Printf("(%s) %s => %s\n", flyRegion, fqdn, record.A)
+	message.Answer = append(message.Answer, record)
+}
+
+func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
+	fqdn := question.Name
+	nameServers := []*dns.NS{}
+	additionals := []*dns.A{}
+	for _, ns := range xip.NameServers {
+		nameServers = append(nameServers, &dns.NS{
+			Hdr: dns.RR_Header{
+				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Second * 10).Seconds()),
+				Name:   fqdn,
+				Rrtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+			},
+			Ns: ns.Ns,
+		})
+
+		additionals = append(additionals, xip.fqdnToA(ns.Ns))
+	}
+
+	for _, record := range nameServers {
+		message.Answer = append(message.Answer, record)
+	}
+
+	for _, record := range additionals {
+		message.Extra = append(message.Extra, record)
 	}
 }
 
@@ -64,8 +113,8 @@ func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 		Ttl:      uint32((time.Second * 10).Seconds()),
 		Rdlength: 0,
 	}
-	soa.Ns = "ns.local-ip.dev."
-	soa.Mbox = "admin.local-ip.dev."
+	soa.Ns = "ns.local-ip.sh."
+	soa.Mbox = "admin.local-ip.sh."
 	soa.Serial = 2022102800
 	// soa.Refresh = uint32((time.Minute * 15).Seconds())
 	soa.Refresh = uint32((time.Second * 10).Seconds())
@@ -81,9 +130,14 @@ func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 
 func (xip *Xip) handleQuery(message *dns.Msg) {
 	for _, question := range message.Question {
+		log.Printf("name: %s\n", question.Name)
+		log.Printf("class: %d\n", question.Qclass)
+		log.Printf("type: %d\n", question.Qtype)
 		switch question.Qtype {
 		case dns.TypeA:
 			xip.handleA(question, message)
+		case dns.TypeNS:
+			xip.handleNS(question, message)
 		}
 	}
 }
