@@ -127,7 +127,12 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 		}
 	}
 
-	return []*dns.A{}
+	return nil
+}
+
+func (xip *Xip) nonExistentDomain(question dns.Question, message *dns.Msg) {
+	message.Rcode = dns.RcodeNameError
+	message.Ns = append(message.Ns, xip.SOARecord(question))
 }
 
 func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
@@ -135,8 +140,7 @@ func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	records := xip.fqdnToA(fqdn)
 
 	if len(records) == 0 {
-		message.Rcode = dns.RcodeNameError
-		message.Ns = append(message.Ns, xip.SOARecord(question))
+		xip.nonExistentDomain(question, message)
 		return
 	}
 
@@ -177,6 +181,7 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].TXT == nil {
+		xip.nonExistentDomain(question, message)
 		return
 	}
 
@@ -195,6 +200,7 @@ func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].MX == nil {
+		xip.nonExistentDomain(question, message)
 		return
 	}
 
@@ -216,6 +222,7 @@ func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].CNAME == nil {
+		xip.nonExistentDomain(question, message)
 		return
 	}
 
@@ -279,6 +286,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 		case dns.TypeCNAME:
 			xip.handleCNAME(question, message)
 		case dns.TypeSOA:
+			xip.handleSOA(question, message)
+		default:
 			xip.handleSOA(question, message)
 		}
 	}
