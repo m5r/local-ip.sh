@@ -46,6 +46,11 @@ var (
 				{Preference: 20, Mx: "mx2.simplelogin.co."},
 			},
 		},
+		"_dmarc.local-ip.sh.": {
+			TXT: &dns.TXT{
+				Txt: []string{"v=DMARC1; p=quarantine; pct=100; adkim=s; aspf=s"},
+			},
+		},
 		"dkim._domainkey.local-ip.sh.": {
 			CNAME: []*dns.CNAME{
 				{Target: "dkim._domainkey.simplelogin.co."},
