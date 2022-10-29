@@ -4,12 +4,12 @@ import (
 	"flag"
 	"strings"
 
-	xip "local-ip.dev/xip"
+	xip "local-ip.sh/xip"
 )
 
 const (
-	zone        = "local-ip.dev."
-	nameservers = "ns.local-ip.dev."
+	zone        = "local-ip.sh."
+	nameservers = "ns1.local-ip.sh.,ns2.local-ip.sh."
 )
 
 func main() {

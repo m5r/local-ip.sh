@@ -1,4 +1,4 @@
-module local-ip.dev
+module local-ip.sh
 
 go 1.19
 
