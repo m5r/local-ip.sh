@@ -18,30 +18,38 @@ type Xip struct {
 	Zone        string
 }
 
+type HardcodedRecord struct {
+	A   net.IP
+	TXT []string
+}
+
 var (
 	flyRegion        = os.Getenv("FLY_REGION")
 	dottedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
 	dashedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
-	hardcodedDomains = map[string]net.IP{
-		"ns.local-ip.sh.":  net.IPv4(137, 66, 38, 214),
-		"ns1.local-ip.sh.": net.IPv4(137, 66, 38, 214),
-		"ns2.local-ip.sh.": net.IPv4(137, 66, 38, 214),
+	hardcodedRecords = map[string]HardcodedRecord{
+		"ns.local-ip.sh.": {
+			A: net.IPv4(137, 66, 38, 214),
+		},
+		"local-ip.sh.": {
+			A:   net.IPv4(137, 66, 53, 22),
+			TXT: []string{"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf"},
+		},
 	}
 )
 
 func (xip *Xip) fqdnToA(fqdn string) *dns.A {
 	var ipV4Address net.IP
+	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
+		ipV4Address = hardcodedRecords[strings.ToLower(fqdn)].A
+	}
 
-	if hardcodedDomains[strings.ToLower(fqdn)] != nil {
-		ipV4Address = hardcodedDomains[strings.ToLower(fqdn)]
-	} else {
-		for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
-			if ipV4RE.MatchString(fqdn) {
-				match := ipV4RE.FindStringSubmatch(fqdn)[1]
-				match = strings.ReplaceAll(match, "-", ".")
-				ipV4Address = net.ParseIP(match).To4()
-				break
-			}
+	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
+		if ipV4RE.MatchString(fqdn) {
+			match := ipV4RE.FindStringSubmatch(fqdn)[1]
+			match = strings.ReplaceAll(match, "-", ".")
+			ipV4Address = net.ParseIP(match).To4()
+			break
 		}
 	}
 
@@ -103,6 +111,24 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 	}
 }
 
+func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
+	fqdn := question.Name
+	if hardcodedRecords[strings.ToLower(fqdn)].TXT == nil {
+		return
+	}
+
+	message.Answer = append(message.Answer, &dns.TXT{
+		Hdr: dns.RR_Header{
+			// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+			Ttl:    uint32((time.Second * 10).Seconds()),
+			Name:   fqdn,
+			Rrtype: dns.TypeTXT,
+			Class:  dns.ClassINET,
+		},
+		Txt: hardcodedRecords[strings.ToLower(fqdn)].TXT,
+	})
+}
+
 func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
@@ -138,6 +164,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 			xip.handleA(question, message)
 		case dns.TypeNS:
 			xip.handleNS(question, message)
+		case dns.TypeTXT:
+			xip.handleTXT(question, message)
 		}
 	}
 }
