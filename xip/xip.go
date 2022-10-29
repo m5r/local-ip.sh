@@ -19,9 +19,10 @@ type Xip struct {
 }
 
 type HardcodedRecord struct {
-	A   *dns.A
-	TXT *dns.TXT
-	MX  []*dns.MX
+	A     *dns.A
+	TXT   *dns.TXT
+	MX    []*dns.MX
+	CNAME []*dns.CNAME
 }
 
 var (
@@ -43,6 +44,21 @@ var (
 			MX: []*dns.MX{
 				{Preference: 10, Mx: "mx1.simplelogin.co."},
 				{Preference: 20, Mx: "mx2.simplelogin.co."},
+			},
+		},
+		"dkim._domainkey.local-ip.sh.": {
+			CNAME: []*dns.CNAME{
+				{Target: "dkim._domainkey.simplelogin.co."},
+			},
+		},
+		"dkim02._domainkey.local-ip.sh.": {
+			CNAME: []*dns.CNAME{
+				{Target: "dkim02._domainkey.simplelogin.co."},
+			},
+		},
+		"dkim03._domainkey.local-ip.sh.": {
+			CNAME: []*dns.CNAME{
+				{Target: "dkim03._domainkey.simplelogin.co."},
 			},
 		},
 	}
@@ -160,6 +176,26 @@ func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 	}
 }
 
+func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
+	fqdn := question.Name
+	if hardcodedRecords[strings.ToLower(fqdn)].CNAME == nil {
+		return
+	}
+
+	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].CNAME {
+		message.Answer = append(message.Answer, &dns.CNAME{
+			Hdr: dns.RR_Header{
+				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Second * 10).Seconds()),
+				Name:   fqdn,
+				Rrtype: dns.TypeCNAME,
+				Class:  dns.ClassINET,
+			},
+			Target: record.Target,
+		})
+	}
+}
+
 func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
@@ -199,6 +235,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 			xip.handleTXT(question, message)
 		case dns.TypeMX:
 			xip.handleMX(question, message)
+		case dns.TypeCNAME:
+			xip.handleCNAME(question, message)
 		}
 	}
 }
