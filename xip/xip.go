@@ -19,9 +19,9 @@ type Xip struct {
 }
 
 type HardcodedRecord struct {
-	A   net.IP
-	TXT []string
-	MX  []dns.MX
+	A   *dns.A
+	TXT *dns.TXT
+	MX  []*dns.MX
 }
 
 var (
@@ -30,15 +30,17 @@ var (
 	dashedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 	hardcodedRecords = map[string]HardcodedRecord{
 		"ns.local-ip.sh.": {
-			A: net.IPv4(137, 66, 38, 214),
+			A: &dns.A{A: net.IPv4(137, 66, 38, 214)},
 		},
 		"local-ip.sh.": {
-			A: net.IPv4(137, 66, 53, 22),
-			TXT: []string{
-				"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf",
-				"v=spf1 include:simplelogin.co ~all",
+			A: &dns.A{A: net.IPv4(137, 66, 53, 22)},
+			TXT: &dns.TXT{
+				Txt: []string{
+					"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf",
+					"v=spf1 include:simplelogin.co ~all",
+				},
 			},
-			MX: []dns.MX{
+			MX: []*dns.MX{
 				{Preference: 10, Mx: "mx1.simplelogin.co."},
 				{Preference: 20, Mx: "mx2.simplelogin.co."},
 			},
@@ -49,7 +51,7 @@ var (
 func (xip *Xip) fqdnToA(fqdn string) *dns.A {
 	var ipV4Address net.IP
 	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
-		ipV4Address = hardcodedRecords[strings.ToLower(fqdn)].A
+		ipV4Address = hardcodedRecords[strings.ToLower(fqdn)].A.A
 	}
 
 	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
@@ -133,7 +135,7 @@ func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
 		},
-		Txt: hardcodedRecords[strings.ToLower(fqdn)].TXT,
+		Txt: hardcodedRecords[strings.ToLower(fqdn)].TXT.Txt,
 	})
 }
 
