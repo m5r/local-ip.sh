@@ -19,7 +19,7 @@ type Xip struct {
 }
 
 type HardcodedRecord struct {
-	A     *dns.A
+	A     []*dns.A
 	TXT   *dns.TXT
 	MX    []*dns.MX
 	CNAME []*dns.CNAME
@@ -31,10 +31,26 @@ var (
 	dashedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 	hardcodedRecords = map[string]HardcodedRecord{
 		"ns.local-ip.sh.": {
-			A: &dns.A{A: net.IPv4(137, 66, 38, 214)},
+			// record holding ip addresses of ns1 and ns2
+			A: []*dns.A{
+				{A: net.IPv4(137, 66, 38, 214)},
+				{A: net.IPv4(213, 188, 206, 3)},
+			},
+		},
+		"ns1.local-ip.sh.": {
+			A: []*dns.A{
+				{A: net.IPv4(137, 66, 38, 214)}, // fly.io global ip address
+			},
+		},
+		"ns2.local-ip.sh.": {
+			A: []*dns.A{
+				{A: net.IPv4(213, 188, 206, 3)}, // fly.io singaporean ip address
+			},
 		},
 		"local-ip.sh.": {
-			A: &dns.A{A: net.IPv4(137, 66, 53, 22)},
+			A: []*dns.A{
+				{A: net.IPv4(137, 66, 53, 22)},
+			},
 			TXT: &dns.TXT{
 				Txt: []string{
 					"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf",
@@ -69,49 +85,65 @@ var (
 	}
 )
 
-func (xip *Xip) fqdnToA(fqdn string) *dns.A {
-	var ipV4Address net.IP
+func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
-		ipV4Address = hardcodedRecords[strings.ToLower(fqdn)].A.A
+		var records []*dns.A
+
+		for _, record := range hardcodedRecords[strings.ToLower(fqdn)].A {
+			records = append(records, &dns.A{
+				Hdr: dns.RR_Header{
+					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+					Ttl:    uint32((time.Second * 10).Seconds()),
+					Name:   fqdn,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+				},
+				A: record.A,
+			})
+		}
+
+		return records
 	}
 
 	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
 		if ipV4RE.MatchString(fqdn) {
 			match := ipV4RE.FindStringSubmatch(fqdn)[1]
 			match = strings.ReplaceAll(match, "-", ".")
-			ipV4Address = net.ParseIP(match).To4()
-			break
+			ipV4Address := net.ParseIP(match).To4()
+			if ipV4Address == nil {
+				return nil
+			}
+
+			return []*dns.A{{
+				Hdr: dns.RR_Header{
+					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+					Ttl:    uint32((time.Second * 10).Seconds()),
+					Name:   fqdn,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+				},
+				A: ipV4Address,
+			}}
 		}
 	}
 
-	if ipV4Address == nil {
-		return nil
-	}
-
-	return &dns.A{
-		Hdr: dns.RR_Header{
-			// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-			Ttl:    uint32((time.Second * 10).Seconds()),
-			Name:   fqdn,
-			Rrtype: dns.TypeA,
-			Class:  dns.ClassINET,
-		},
-		A: ipV4Address,
-	}
+	return []*dns.A{}
 }
 
 func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
-	record := xip.fqdnToA(fqdn)
+	records := xip.fqdnToA(fqdn)
 
-	if record == nil {
+	if len(records) == 0 {
 		message.Rcode = dns.RcodeNameError
 		message.Ns = append(message.Ns, xip.SOARecord(question))
 		return
 	}
 
-	log.Printf("(%s) %s => %s\n", flyRegion, fqdn, record.A)
-	message.Answer = append(message.Answer, record)
+	for _, record := range records {
+		log.Printf("(%s) %s => %s\n", flyRegion, fqdn, record.A)
+		message.Answer = append(message.Answer, record)
+	}
 }
 
 func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
@@ -130,16 +162,18 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 			Ns: ns.Ns,
 		})
 
-		additionals = append(additionals, xip.fqdnToA(ns.Ns))
+		additionals = append(additionals, xip.fqdnToA(ns.Ns)...)
 	}
+
+	log.Println(additionals)
 
 	for _, record := range nameServers {
 		message.Answer = append(message.Answer, record)
 	}
 
-	for _, record := range additionals {
-		message.Extra = append(message.Extra, record)
-	}
+	// for _, record := range additionals {
+	// message.Extra = append(message.Extra, record)
+	// }
 }
 
 func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
