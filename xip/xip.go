@@ -21,6 +21,7 @@ type Xip struct {
 type HardcodedRecord struct {
 	A   net.IP
 	TXT []string
+	MX  []dns.MX
 }
 
 var (
@@ -32,8 +33,15 @@ var (
 			A: net.IPv4(137, 66, 38, 214),
 		},
 		"local-ip.sh.": {
-			A:   net.IPv4(137, 66, 53, 22),
-			TXT: []string{"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf"},
+			A: net.IPv4(137, 66, 53, 22),
+			TXT: []string{
+				"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf",
+				"v=spf1 include:simplelogin.co ~all",
+			},
+			MX: []dns.MX{
+				{Preference: 10, Mx: "mx1.simplelogin.co."},
+				{Preference: 20, Mx: "mx2.simplelogin.co."},
+			},
 		},
 	}
 )
@@ -129,6 +137,27 @@ func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 	})
 }
 
+func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
+	fqdn := question.Name
+	if hardcodedRecords[strings.ToLower(fqdn)].MX == nil {
+		return
+	}
+
+	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].MX {
+		message.Answer = append(message.Answer, &dns.MX{
+			Hdr: dns.RR_Header{
+				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Second * 10).Seconds()),
+				Name:   fqdn,
+				Rrtype: dns.TypeMX,
+				Class:  dns.ClassINET,
+			},
+			Mx:         record.Mx,
+			Preference: record.Preference,
+		})
+	}
+}
+
 func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
@@ -166,6 +195,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 			xip.handleNS(question, message)
 		case dns.TypeTXT:
 			xip.handleTXT(question, message)
+		case dns.TypeMX:
+			xip.handleMX(question, message)
 		}
 	}
 }
