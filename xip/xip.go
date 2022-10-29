@@ -235,6 +235,10 @@ func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 	}
 }
 
+func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
+	message.Answer = append(message.Answer, xip.SOARecord(question))
+}
+
 func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
@@ -245,7 +249,7 @@ func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
 		Ttl:      uint32((time.Second * 10).Seconds()),
 		Rdlength: 0,
 	}
-	soa.Ns = "ns.local-ip.sh."
+	soa.Ns = "ns1.local-ip.sh."
 	soa.Mbox = "admin.local-ip.sh."
 	soa.Serial = 2022102800
 	// soa.Refresh = uint32((time.Minute * 15).Seconds())
@@ -276,6 +280,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 			xip.handleMX(question, message)
 		case dns.TypeCNAME:
 			xip.handleCNAME(question, message)
+		case dns.TypeSOA:
+			xip.handleSOA(question, message)
 		}
 	}
 }
