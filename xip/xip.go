@@ -165,15 +165,13 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 		additionals = append(additionals, xip.fqdnToA(ns.Ns)...)
 	}
 
-	log.Println(additionals)
-
 	for _, record := range nameServers {
 		message.Answer = append(message.Answer, record)
 	}
 
-	// for _, record := range additionals {
-	// message.Extra = append(message.Extra, record)
-	// }
+	for _, record := range additionals {
+		message.Extra = append(message.Extra, record)
+	}
 }
 
 func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
