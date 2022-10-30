@@ -20,6 +20,7 @@ type Xip struct {
 
 type HardcodedRecord struct {
 	A     []*dns.A
+	AAAA  []*dns.AAAA
 	TXT   *dns.TXT
 	MX    []*dns.MX
 	CNAME []*dns.CNAME
@@ -49,7 +50,10 @@ var (
 		},
 		"local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(137, 66, 53, 22)},
+				{A: net.IPv4(213, 188, 218, 137)},
+			},
+			AAAA: []*dns.AAAA{
+				{AAAA: net.IP{0x2a, 0x09, 0x82, 0x80, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x91, 0x65}},
 			},
 			TXT: &dns.TXT{
 				Txt: []string{
@@ -80,6 +84,11 @@ var (
 		"dkim03._domainkey.local-ip.sh.": {
 			CNAME: []*dns.CNAME{
 				{Target: "dkim03._domainkey.simplelogin.co."},
+			},
+		},
+		"_acme-challenge.local-ip.sh.": {
+			CNAME: []*dns.CNAME{
+				{Target: "local-ip.sh.n2kl11.flydns.net."},
 			},
 		},
 	}
@@ -147,6 +156,27 @@ func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	for _, record := range records {
 		log.Printf("(%s) %s => %s\n", flyRegion, fqdn, record.A)
 		message.Answer = append(message.Answer, record)
+	}
+}
+
+func (xip *Xip) handleAAAA(question dns.Question, message *dns.Msg) {
+	fqdn := question.Name
+	if hardcodedRecords[strings.ToLower(fqdn)].AAAA == nil {
+		xip.nonExistentDomain(question, message)
+		return
+	}
+
+	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].AAAA {
+		message.Answer = append(message.Answer, &dns.AAAA{
+			Hdr: dns.RR_Header{
+				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Second * 10).Seconds()),
+				Name:   fqdn,
+				Rrtype: dns.TypeAAAA,
+				Class:  dns.ClassINET,
+			},
+			AAAA: record.AAAA,
+		})
 	}
 }
 
@@ -277,6 +307,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 		switch question.Qtype {
 		case dns.TypeA:
 			xip.handleA(question, message)
+		case dns.TypeAAAA:
+			xip.handleAAAA(question, message)
 		case dns.TypeNS:
 			xip.handleNS(question, message)
 		case dns.TypeTXT:
