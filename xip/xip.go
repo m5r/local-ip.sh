@@ -90,6 +90,9 @@ var (
 			CNAME: []*dns.CNAME{
 				{Target: "local-ip.sh.n2kl11.flydns.net."},
 			},
+			/* TXT: &dns.TXT{
+				Txt: []string{"Gu1FvnTHYuf0qWclc903w8JPDJajHE510AweTP2PkhE"},
+			}, */
 		},
 	}
 )

@@ -1,2 +1,2 @@
-# build output
-local-ip.sh
+.lego/accounts/acme-v02.api.letsencrypt.org/*/keys
+.lego/certificates
