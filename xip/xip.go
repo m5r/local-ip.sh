@@ -139,8 +139,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 	return nil
 }
 
-func (xip *Xip) nonExistentDomain(question dns.Question, message *dns.Msg) {
-	message.Rcode = dns.RcodeNameError
+func (xip *Xip) answerWithAuthority(question dns.Question, message *dns.Msg) {
 	message.Ns = append(message.Ns, xip.SOARecord(question))
 }
 
@@ -149,7 +148,8 @@ func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	records := xip.fqdnToA(fqdn)
 
 	if len(records) == 0 {
-		xip.nonExistentDomain(question, message)
+		message.Rcode = dns.RcodeNameError
+		xip.answerWithAuthority(question, message)
 		return
 	}
 
@@ -162,7 +162,7 @@ func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleAAAA(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].AAAA == nil {
-		xip.nonExistentDomain(question, message)
+		xip.answerWithAuthority(question, message)
 		return
 	}
 
@@ -211,14 +211,14 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].TXT == nil {
-		xip.nonExistentDomain(question, message)
+		xip.answerWithAuthority(question, message)
 		return
 	}
 
 	message.Answer = append(message.Answer, &dns.TXT{
 		Hdr: dns.RR_Header{
 			// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-			Ttl:    uint32((time.Second * 10).Seconds()),
+			Ttl:    uint32((time.Second * 120).Seconds()),
 			Name:   fqdn,
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
@@ -230,7 +230,7 @@ func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].MX == nil {
-		xip.nonExistentDomain(question, message)
+		xip.answerWithAuthority(question, message)
 		return
 	}
 
@@ -252,7 +252,7 @@ func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	if hardcodedRecords[strings.ToLower(fqdn)].CNAME == nil {
-		xip.nonExistentDomain(question, message)
+		xip.answerWithAuthority(question, message)
 		return
 	}
 
