@@ -87,17 +87,23 @@ var (
 			},
 		},
 		"_acme-challenge.local-ip.sh.": {
-			CNAME: []*dns.CNAME{
+			// if fly
+			/* CNAME: []*dns.CNAME{
 				{Target: "local-ip.sh.n2kl11.flydns.net."},
-			},
-			/* TXT: &dns.TXT{
-				Txt: []string{"Gu1FvnTHYuf0qWclc903w8JPDJajHE510AweTP2PkhE"},
 			}, */
+			// if manual
+			TXT: &dns.TXT{
+				Txt: []string{"YOnjnzc3vnp67aLT22CXGEeOpEV0OiZ5ixRAWCPW18Y"},
+			},
 		},
 	}
 )
 
 func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
+	/* hardcodedRecords["_acme-challenge.local-ip.sh."].TXT = &dns.TXT{
+		Txt: []string{"YOnjnzc3vnp67aLT22CXGEeOpEV0OiZ5ixRAWCPW18Y"},
+	} */
+
 	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
 		var records []*dns.A
 
@@ -307,6 +313,12 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 		log.Printf("name: %s\n", question.Name)
 		log.Printf("class: %d\n", question.Qclass)
 		log.Printf("type: %d\n", question.Qtype)
+
+		// if fly
+		/* if strings.HasPrefix(strings.ToLower(question.Name), "_acme-challenge.") {
+			message.Authoritative = false
+		} */
+
 		switch question.Qtype {
 		case dns.TypeA:
 			xip.handleA(question, message)
