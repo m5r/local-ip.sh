@@ -13,9 +13,9 @@ import (
 )
 
 type Xip struct {
-	Server      dns.Server
-	NameServers []*dns.NS
-	Zone        string
+	server      dns.Server
+	nameServers []*dns.NS
+	zone        string
 }
 
 type HardcodedRecord struct {
@@ -93,17 +93,13 @@ var (
 			}, */
 			// if manual
 			TXT: &dns.TXT{
-				Txt: []string{"YOnjnzc3vnp67aLT22CXGEeOpEV0OiZ5ixRAWCPW18Y"},
+				Txt: []string{"FRMKrfS9tGP5Gap6ruCG7qRprBlMrsBnQPtMD-dmOGk"},
 			},
 		},
 	}
 )
 
 func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
-	/* hardcodedRecords["_acme-challenge.local-ip.sh."].TXT = &dns.TXT{
-		Txt: []string{"YOnjnzc3vnp67aLT22CXGEeOpEV0OiZ5ixRAWCPW18Y"},
-	} */
-
 	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
 		var records []*dns.A
 
@@ -149,7 +145,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 }
 
 func (xip *Xip) answerWithAuthority(question dns.Question, message *dns.Msg) {
-	message.Ns = append(message.Ns, xip.SOARecord(question))
+	message.Ns = append(message.Ns, xip.soaRecord(question))
 }
 
 func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
@@ -193,7 +189,7 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
 	nameServers := []*dns.NS{}
 	additionals := []*dns.A{}
-	for _, ns := range xip.NameServers {
+	for _, ns := range xip.nameServers {
 		nameServers = append(nameServers, &dns.NS{
 			Hdr: dns.RR_Header{
 				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
@@ -280,10 +276,10 @@ func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 }
 
 func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
-	message.Answer = append(message.Answer, xip.SOARecord(question))
+	message.Answer = append(message.Answer, xip.soaRecord(question))
 }
 
-func (xip *Xip) SOARecord(question dns.Question) *dns.SOA {
+func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
 		Name:   question.Name,
@@ -360,9 +356,9 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 }
 
 func (xip *Xip) StartServer() {
-	log.Printf("Listening on %s\n", xip.Server.Addr)
-	err := xip.Server.ListenAndServe()
-	defer xip.Server.Shutdown()
+	log.Printf("Listening on %s\n", xip.server.Addr)
+	err := xip.server.ListenAndServe()
+	defer xip.server.Shutdown()
 	if err != nil {
 		log.Fatalf("Failed to start server: %s\n ", err.Error())
 	}
@@ -372,10 +368,10 @@ func NewXip(zone string, nameservers []string, port int) (xip *Xip) {
 	xip = &Xip{}
 
 	for _, ns := range nameservers {
-		xip.NameServers = append(xip.NameServers, &dns.NS{Ns: ns})
+		xip.nameServers = append(xip.nameServers, &dns.NS{Ns: ns})
 	}
 
-	xip.Server = dns.Server{
+	xip.server = dns.Server{
 		Addr: ":" + strconv.Itoa(port),
 		Net:  "udp",
 	}
