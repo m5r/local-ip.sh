@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"log"
 	"strings"
 	"time"
 
@@ -23,7 +22,6 @@ func main() {
 
 	go func() {
 		account := certs.LoadAccount()
-		log.Println(account.Registration.Body.Contact)
 		certsClient := certs.NewCertsClient(n, account)
 
 		time.Sleep(5 * time.Second)
@@ -32,7 +30,7 @@ func main() {
 		for {
 			// renew certificate every month
 			time.Sleep(30 * 24 * time.Hour)
-			certsClient.RenewCertificate()
+			certsClient.RequestCertificate()
 		}
 	}()
 

@@ -5,7 +5,9 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
@@ -20,7 +22,19 @@ type certsClient struct {
 func (c *certsClient) RequestCertificate() {
 	log.Println("requesting a certificate")
 	if c.lastCertificate != nil {
-		c.RenewCertificate()
+		certificates, err := certcrypto.ParsePEMBundle(c.lastCertificate.Certificate)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		x509Cert := certificates[0]
+		timeLeft := x509Cert.NotAfter.Sub(time.Now().UTC())
+		if timeLeft > time.Hour*24*30 {
+			log.Printf("%d days left before expiration, will not renew", int(timeLeft.Hours()/24))
+			return
+		}
+
+		c.renewCertificate()
 		return
 	}
 
@@ -38,7 +52,7 @@ func (c *certsClient) RequestCertificate() {
 	log.Printf("%#v\n", certificates)
 }
 
-func (c *certsClient) RenewCertificate() {
+func (c *certsClient) renewCertificate() {
 	log.Println("renewing currently existing certificate")
 	certificates, err := c.legoClient.Certificate.Renew(*c.lastCertificate, true, false, "")
 	if err != nil {
