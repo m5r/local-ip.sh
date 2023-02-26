@@ -1,0 +1,12 @@
+{
+	"Email": "admin@local-ip.sh",
+	"Registration": {
+		"body": {
+			"status": "valid",
+			"contact": [
+				"mailto:admin@local-ip.sh"
+			]
+		},
+		"uri": "https://acme-staging-v02.api.letsencrypt.org/acme/acct/90246504"
+	}
+}

@@ -1,2 +1,3 @@
 .lego/accounts/acme-v02.api.letsencrypt.org/*/keys
+.lego/accounts/acme-staging-v02.api.letsencrypt.org/*/keys
 .lego/certificates

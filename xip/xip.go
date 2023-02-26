@@ -99,6 +99,34 @@ var (
 	}
 )
 
+func (xip *Xip) SetTXTRecord(fqdn string, value string) {
+	log.Printf("trying to set TXT record \"%s\" for fqdn \"%s\"", value, fqdn)
+	if fqdn != "_acme-challenge.local-ip.sh." {
+		log.Println("not allowed, abort")
+		return
+	}
+
+	if records, ok := hardcodedRecords[fqdn]; ok {
+		records.TXT = &dns.TXT{
+			Txt: []string{value},
+		}
+		hardcodedRecords["_acme-challenge.local-ip.sh."] = records
+	}
+}
+
+func (xip *Xip) UnsetTXTRecord(fqdn string) {
+	log.Printf("trying to unset TXT record for fqdn \"%s\"", fqdn)
+	if fqdn != "_acme-challenge.local-ip.sh." {
+		log.Println("not allowed, abort")
+		return
+	}
+
+	if records, ok := hardcodedRecords[fqdn]; ok {
+		records.TXT = nil
+		hardcodedRecords["_acme-challenge.local-ip.sh."] = records
+	}
+}
+
 func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
 		var records []*dns.A
@@ -310,10 +338,9 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 		log.Printf("class: %d\n", question.Qclass)
 		log.Printf("type: %d\n", question.Qtype)
 
-		// if fly
-		/* if strings.HasPrefix(strings.ToLower(question.Name), "_acme-challenge.") {
+		if strings.HasPrefix(strings.ToLower(question.Name), "_acme-challenge.") {
 			message.Authoritative = false
-		} */
+		}
 
 		switch question.Qtype {
 		case dns.TypeA:
@@ -372,7 +399,7 @@ func NewXip(zone string, nameservers []string, port int) (xip *Xip) {
 	}
 
 	xip.server = dns.Server{
-		Addr: ":" + strconv.Itoa(port),
+		Addr: "0.0.0.0:" + strconv.Itoa(port),
 		Net:  "udp",
 	}
 

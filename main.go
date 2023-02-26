@@ -4,7 +4,7 @@ import (
 	"flag"
 	"strings"
 
-	xip "local-ip.sh/xip"
+	"local-ip.sh/xip"
 )
 
 const (
@@ -17,5 +17,17 @@ func main() {
 	flag.Parse()
 
 	n := xip.NewXip(zone, strings.Split(nameservers, ","), *port)
+
+	// not functional yet
+	/* go func() {
+		account := certs.LoadAccount()
+		log.Println(account.Registration.Body.Contact)
+		ddd := certs.NewCertsClient(n, account)
+
+		time.Sleep(5 * time.Second)
+		fmt.Println("requesting certs")
+		ddd.RequestCertificate()
+	}() */
+
 	n.StartServer()
 }

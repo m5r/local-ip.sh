@@ -13,6 +13,7 @@ ENV PORT 53
 WORKDIR /
 
 COPY --from=build /app/local-ip /
+COPY ./.lego /.lego
 
 EXPOSE $PORT
 USER root
