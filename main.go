@@ -2,8 +2,11 @@ package main
 
 import (
 	"flag"
+	"log"
 	"strings"
+	"time"
 
+	"local-ip.sh/certs"
 	"local-ip.sh/xip"
 )
 
@@ -18,16 +21,20 @@ func main() {
 
 	n := xip.NewXip(zone, strings.Split(nameservers, ","), *port)
 
-	// not functional yet
-	/* go func() {
+	go func() {
 		account := certs.LoadAccount()
 		log.Println(account.Registration.Body.Contact)
-		ddd := certs.NewCertsClient(n, account)
+		certsClient := certs.NewCertsClient(n, account)
 
 		time.Sleep(5 * time.Second)
-		fmt.Println("requesting certs")
-		ddd.RequestCertificate()
-	}() */
+		certsClient.RequestCertificate()
+
+		for {
+			// renew certificate every month
+			time.Sleep(30 * 24 * time.Hour)
+			certsClient.RenewCertificate()
+		}
+	}()
 
 	n.StartServer()
 }

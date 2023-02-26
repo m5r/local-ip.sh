@@ -92,9 +92,7 @@ var (
 				{Target: "local-ip.sh.n2kl11.flydns.net."},
 			}, */
 			// if manual
-			TXT: &dns.TXT{
-				Txt: []string{"FRMKrfS9tGP5Gap6ruCG7qRprBlMrsBnQPtMD-dmOGk"},
-			},
+			TXT: &dns.TXT{},
 		},
 	}
 )
@@ -334,13 +332,13 @@ func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 
 func (xip *Xip) handleQuery(message *dns.Msg) {
 	for _, question := range message.Question {
-		log.Printf("name: %s\n", question.Name)
-		log.Printf("class: %d\n", question.Qclass)
-		log.Printf("type: %d\n", question.Qtype)
+		// log.Printf("name: %s\n", question.Name)
+		// log.Printf("class: %d\n", question.Qclass)
+		// log.Printf("type: %d\n", question.Qtype)
 
-		if strings.HasPrefix(strings.ToLower(question.Name), "_acme-challenge.") {
+		/* if strings.HasPrefix(strings.ToLower(question.Name), "_acme-challenge.") {
 			message.Authoritative = false
-		}
+		} */
 
 		switch question.Qtype {
 		case dns.TypeA:
@@ -399,7 +397,7 @@ func NewXip(zone string, nameservers []string, port int) (xip *Xip) {
 	}
 
 	xip.server = dns.Server{
-		Addr: "0.0.0.0:" + strconv.Itoa(port),
+		Addr: ":" + strconv.Itoa(port),
 		Net:  "udp",
 	}
 

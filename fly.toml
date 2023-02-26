@@ -16,3 +16,7 @@ processes = []
 
   [[services.ports]]
     port = "53"
+
+[mounts]
+  source="certs"
+  destination="/certs"

@@ -9,7 +9,7 @@ import (
 
 const (
 	email    = "admin@local-ip.sh"
-	caDirUrl = lego.LEDirectoryStaging
+	caDirUrl = lego.LEDirectoryProduction
 )
 
 var parsedCaDirUrl, _ = url.Parse(caDirUrl)
