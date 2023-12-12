@@ -50,10 +50,10 @@ var (
 		},
 		"local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(213, 188, 218, 137)},
+				{A: net.IPv4(37, 16, 23, 113)},
 			},
 			AAAA: []*dns.AAAA{
-				{AAAA: net.IP{0x2a, 0x09, 0x82, 0x80, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x91, 0x65}},
+				{AAAA: net.IP{0x2a, 0x09, 0x82, 0x80, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x1C, 0xC1, 0xC1}},
 			},
 			TXT: &dns.TXT{
 				Txt: []string{
@@ -88,9 +88,9 @@ var (
 		},
 		"_acme-challenge.local-ip.sh.": {
 			// if fly
-			/* CNAME: []*dns.CNAME{
-				{Target: "local-ip.sh.n2kl11.flydns.net."},
-			}, */
+			CNAME: []*dns.CNAME{
+				{Target: "local-ip.sh.zzkxm3.flydns.net."},
+			},
 			// if manual
 			TXT: &dns.TXT{},
 		},
