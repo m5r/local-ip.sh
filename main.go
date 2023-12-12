@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"local-ip.sh/certs"
+	"local-ip.sh/http"
 	"local-ip.sh/xip"
 )
 
@@ -15,7 +16,7 @@ const (
 )
 
 func main() {
-	var port = flag.Int("port", 53, "port the DNS server should bind to")
+	port := flag.Int("port", 53, "port the DNS server should bind to")
 	flag.Parse()
 
 	n := xip.NewXip(zone, strings.Split(nameservers, ","), *port)
@@ -33,6 +34,8 @@ func main() {
 			certsClient.RequestCertificate()
 		}
 	}()
+
+	go http.ServeCertificate()
 
 	n.StartServer()
 }
