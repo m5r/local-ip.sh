@@ -12,7 +12,9 @@ const (
 	caDirUrl = lego.LEDirectoryProduction
 )
 
-var parsedCaDirUrl, _ = url.Parse(caDirUrl)
-var caDirHostname = parsedCaDirUrl.Hostname()
-var accountFilePath = fmt.Sprintf("./.lego/accounts/%s/%s/account.json", caDirHostname, email)
-var keyFilePath = fmt.Sprintf("./.lego/accounts/%s/%s/keys/%s.key", caDirHostname, email, email)
+var (
+	parsedCaDirUrl, _ = url.Parse(caDirUrl)
+	caDirHostname     = parsedCaDirUrl.Hostname()
+	accountFilePath   = fmt.Sprintf("./.lego/accounts/%s/%s/account.json", caDirHostname, email)
+	keyFilePath       = fmt.Sprintf("./.lego/accounts/%s/%s/keys/%s.key", caDirHostname, email, email)
+)

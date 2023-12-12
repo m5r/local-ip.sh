@@ -105,7 +105,7 @@ func getLastCertificate(legoClient *lego.Client) *certificate.Resource {
 		return nil
 	}
 
-	var lastCertificate = &certificate.Resource{}
+	lastCertificate := &certificate.Resource{}
 	err = json.Unmarshal(jsonBytes, lastCertificate)
 	if err != nil {
 		log.Println(err)

@@ -1,22 +1,44 @@
-app = "local-ip"
-kill_signal = "SIGINT"
-kill_timeout = 5
-processes = []
+# fly.toml app configuration file generated for local-ip-ancient-glade-4376 on 2023-11-29T11:43:10+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-[env]
-  PORT = "53"
+app = "local-ip"
+primary_region = "ams"
+kill_signal = "SIGINT"
+kill_timeout = "5s"
 
 [experimental]
-  allowed_public_ports = []
-  auto_rollback = true
+auto_rollback = true
 
-[[services]]
-  internal_port = 53
-  protocol = "udp"
+[build]
 
-  [[services.ports]]
-    port = "53"
+[env]
+PORT = "53"
 
 [mounts]
-  source="certs"
-  destination="/certs"
+source = "certs"
+destination = "/certs"
+
+[http_service]
+internal_port = 53
+force_https = true
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 0
+processes = ["app"]
+
+[[services]]
+protocol = "udp"
+internal_port = 53
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 0
+
+[[services.ports]]
+port = 53
+
+[[vm]]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 256

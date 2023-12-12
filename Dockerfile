@@ -1,4 +1,4 @@
-FROM golang:1.19-alpine AS build
+FROM golang:1.21-alpine AS build
 
 WORKDIR /app
 COPY . .
@@ -6,7 +6,7 @@ COPY . .
 RUN go mod download
 RUN CGO_ENABLED=0 go build -o /app/local-ip
 
-FROM gcr.io/distroless/base-debian11
+FROM gcr.io/distroless/base-debian12:latest
 
 ENV PORT 53
 

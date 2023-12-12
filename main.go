@@ -28,8 +28,8 @@ func main() {
 		certsClient.RequestCertificate()
 
 		for {
-			// renew certificate every month
-			time.Sleep(30 * 24 * time.Hour)
+			// try to renew certificate every day
+			time.Sleep(24 * time.Hour)
 			certsClient.RequestCertificate()
 		}
 	}()

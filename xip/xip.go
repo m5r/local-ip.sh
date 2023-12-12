@@ -1,11 +1,11 @@
 package xip
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,8 +14,8 @@ import (
 
 type Xip struct {
 	server      dns.Server
-	nameServers []*dns.NS
 	zone        string
+	nameServers []*dns.NS
 }
 
 type HardcodedRecord struct {
@@ -34,18 +34,18 @@ var (
 		"ns.local-ip.sh.": {
 			// record holding ip addresses of ns1 and ns2
 			A: []*dns.A{
-				{A: net.IPv4(137, 66, 38, 214)},
-				{A: net.IPv4(213, 188, 206, 3)},
+				{A: net.IPv4(137, 66, 25, 53)},
+				{A: net.IPv4(188, 93, 146, 54)},
 			},
 		},
 		"ns1.local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(137, 66, 38, 214)}, // fly.io global ip address
+				{A: net.IPv4(137, 66, 25, 53)}, // fly.io global ip address
 			},
 		},
 		"ns2.local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(213, 188, 206, 3)}, // fly.io singaporean ip address
+				{A: net.IPv4(188, 93, 146, 54)}, // fly.io global ip address #2
 			},
 		},
 		"local-ip.sh.": {
@@ -397,7 +397,7 @@ func NewXip(zone string, nameservers []string, port int) (xip *Xip) {
 	}
 
 	xip.server = dns.Server{
-		Addr: ":" + strconv.Itoa(port),
+		Addr: fmt.Sprintf("fly-global-services:%d", port),
 		Net:  "udp",
 	}
 

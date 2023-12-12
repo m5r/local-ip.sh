@@ -18,17 +18,19 @@ import (
 )
 
 type Account struct {
-	Email        string
 	Registration *registration.Resource
 	key          *ecdsa.PrivateKey
+	Email        string
 }
 
 func (u *Account) GetEmail() string {
 	return u.Email
 }
+
 func (u *Account) GetRegistration() *registration.Resource {
 	return u.Registration
 }
+
 func (u *Account) GetPrivateKey() crypto.PrivateKey {
 	return u.key
 }
@@ -71,8 +73,14 @@ func RegisterAccount() {
 	config := lego.NewConfig(account)
 	config.CADirURL = caDirUrl
 	legoClient, err := lego.NewClient(config)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+	if err != nil {
+		log.Fatal(err)
+	}
 	if reg.Body.Status != "valid" {
 		log.Fatalf("registration failed with status %s", reg.Body.Status)
 	}
