@@ -34,18 +34,18 @@ var (
 		"ns.local-ip.sh.": {
 			// record holding ip addresses of ns1 and ns2
 			A: []*dns.A{
-				{A: net.IPv4(137, 66, 25, 53)},
-				{A: net.IPv4(188, 93, 146, 54)},
+				{A: net.IPv4(137, 66, 40, 11)},
+				{A: net.IPv4(137, 66, 40, 12)},
 			},
 		},
 		"ns1.local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(137, 66, 25, 53)}, // fly.io global ip address
+				{A: net.IPv4(137, 66, 40, 11)}, // fly.io edge-only ip address, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
 			},
 		},
 		"ns2.local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(188, 93, 146, 54)}, // fly.io global ip address #2
+				{A: net.IPv4(137, 66, 40, 12)}, // fly.io edge-only ip address #2
 			},
 		},
 		"local-ip.sh.": {
