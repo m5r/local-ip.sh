@@ -87,11 +87,11 @@ var (
 			},
 		},
 		"_acme-challenge.local-ip.sh.": {
-			// if fly
+			// required for fly.io to obtain a certificate for the website
 			CNAME: []*dns.CNAME{
 				{Target: "local-ip.sh.zzkxm3.flydns.net."},
 			},
-			// if manual
+			// will be filled in later when requesting the wildcard certificate
 			TXT: &dns.TXT{},
 		},
 	}
@@ -132,8 +132,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 		for _, record := range hardcodedRecords[strings.ToLower(fqdn)].A {
 			records = append(records, &dns.A{
 				Hdr: dns.RR_Header{
-					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-					Ttl:    uint32((time.Second * 10).Seconds()),
+					Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 					Name:   fqdn,
 					Rrtype: dns.TypeA,
 					Class:  dns.ClassINET,
@@ -156,8 +155,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 
 			return []*dns.A{{
 				Hdr: dns.RR_Header{
-					// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-					Ttl:    uint32((time.Second * 10).Seconds()),
+					Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 					Name:   fqdn,
 					Rrtype: dns.TypeA,
 					Class:  dns.ClassINET,
@@ -200,8 +198,7 @@ func (xip *Xip) handleAAAA(question dns.Question, message *dns.Msg) {
 	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].AAAA {
 		message.Answer = append(message.Answer, &dns.AAAA{
 			Hdr: dns.RR_Header{
-				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-				Ttl:    uint32((time.Second * 10).Seconds()),
+				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeAAAA,
 				Class:  dns.ClassINET,
@@ -218,8 +215,7 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 	for _, ns := range xip.nameServers {
 		nameServers = append(nameServers, &dns.NS{
 			Hdr: dns.RR_Header{
-				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-				Ttl:    uint32((time.Second * 10).Seconds()),
+				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeNS,
 				Class:  dns.ClassINET,
@@ -248,8 +244,7 @@ func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 
 	message.Answer = append(message.Answer, &dns.TXT{
 		Hdr: dns.RR_Header{
-			// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-			Ttl:    uint32((time.Second * 120).Seconds()),
+			Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 			Name:   fqdn,
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
@@ -268,8 +263,7 @@ func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].MX {
 		message.Answer = append(message.Answer, &dns.MX{
 			Hdr: dns.RR_Header{
-				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-				Ttl:    uint32((time.Second * 10).Seconds()),
+				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeMX,
 				Class:  dns.ClassINET,
@@ -290,8 +284,7 @@ func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].CNAME {
 		message.Answer = append(message.Answer, &dns.CNAME{
 			Hdr: dns.RR_Header{
-				// Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-				Ttl:    uint32((time.Second * 10).Seconds()),
+				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeCNAME,
 				Class:  dns.ClassINET,
@@ -308,38 +301,25 @@ func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
 func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
-		Name:   question.Name,
-		Rrtype: dns.TypeSOA,
-		Class:  dns.ClassINET,
-		// Ttl:      uint32((time.Hour * 24 * 7).Seconds()),
-		Ttl:      uint32((time.Second * 10).Seconds()),
+		Name:     question.Name,
+		Rrtype:   dns.TypeSOA,
+		Class:    dns.ClassINET,
+		Ttl:      uint32((time.Hour * 24 * 7).Seconds()),
 		Rdlength: 0,
 	}
 	soa.Ns = "ns1.local-ip.sh."
 	soa.Mbox = "admin.local-ip.sh."
 	soa.Serial = 2022102800
-	// soa.Refresh = uint32((time.Minute * 15).Seconds())
-	soa.Refresh = uint32((time.Second * 10).Seconds())
-	// soa.Retry = uint32((time.Minute * 15).Seconds())
-	soa.Retry = uint32((time.Second * 10).Seconds())
-	// soa.Expire = uint32((time.Minute * 30).Seconds())
-	soa.Expire = uint32((time.Second * 10).Seconds())
-	// soa.Minttl = uint32((time.Minute * 5).Seconds())
-	soa.Minttl = uint32((time.Second * 10).Seconds())
+	soa.Refresh = uint32((time.Minute * 15).Seconds())
+	soa.Retry = uint32((time.Minute * 15).Seconds())
+	soa.Expire = uint32((time.Minute * 30).Seconds())
+	soa.Minttl = uint32((time.Minute * 5).Seconds())
 
 	return soa
 }
 
 func (xip *Xip) handleQuery(message *dns.Msg) {
 	for _, question := range message.Question {
-		// log.Printf("name: %s\n", question.Name)
-		// log.Printf("class: %d\n", question.Qclass)
-		// log.Printf("type: %d\n", question.Qtype)
-
-		/* if strings.HasPrefix(strings.ToLower(question.Name), "_acme-challenge.") {
-			message.Authoritative = false
-		} */
-
 		switch question.Qtype {
 		case dns.TypeA:
 			xip.handleA(question, message)
