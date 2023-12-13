@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"strings"
 	"time"
 
 	"local-ip.sh/certs"
@@ -10,16 +9,11 @@ import (
 	"local-ip.sh/xip"
 )
 
-const (
-	zone        = "local-ip.sh."
-	nameservers = "ns1.local-ip.sh.,ns2.local-ip.sh."
-)
-
 func main() {
 	port := flag.Int("port", 53, "port the DNS server should bind to")
 	flag.Parse()
 
-	n := xip.NewXip(zone, strings.Split(nameservers, ","), *port)
+	n := xip.NewXip(*port)
 
 	go func() {
 		account := certs.LoadAccount()

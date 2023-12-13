@@ -14,7 +14,6 @@ import (
 
 type Xip struct {
 	server      dns.Server
-	zone        string
 	nameServers []*dns.NS
 }
 
@@ -25,6 +24,11 @@ type HardcodedRecord struct {
 	MX    []*dns.MX
 	CNAME []*dns.CNAME
 }
+
+const (
+	zone        = "local-ip.sh."
+	nameservers = "ns1.local-ip.sh.,ns2.local-ip.sh."
+)
 
 var (
 	flyRegion        = os.Getenv("FLY_REGION")
@@ -369,10 +373,10 @@ func (xip *Xip) StartServer() {
 	}
 }
 
-func NewXip(zone string, nameservers []string, port int) (xip *Xip) {
+func NewXip(port int) (xip *Xip) {
 	xip = &Xip{}
 
-	for _, ns := range nameservers {
+	for _, ns := range strings.Split(nameservers, ",") {
 		xip.nameServers = append(xip.nameServers, &dns.NS{Ns: ns})
 	}
 
