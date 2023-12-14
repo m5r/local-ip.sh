@@ -369,6 +369,18 @@ func (xip *Xip) StartServer() {
 	err := xip.server.ListenAndServe()
 	defer xip.server.Shutdown()
 	if err != nil {
+		if strings.Contains(err.Error(), "fly-global-services: no such host") {
+			// we're not running on fly, bind to 0.0.0.0 instead
+			port := strings.Split(xip.server.Addr, ":")[1]
+			xip.server = dns.Server{
+				Addr: fmt.Sprintf(":%s", port),
+				Net:  "udp",
+			}
+
+			xip.StartServer()
+			return
+		}
+
 		log.Fatalf("Failed to start server: %s\n ", err.Error())
 	}
 }
