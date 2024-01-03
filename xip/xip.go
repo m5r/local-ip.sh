@@ -54,7 +54,7 @@ var (
 		},
 		"local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(37, 16, 23, 113)},
+				{A: net.IPv4(66, 241, 125, 48)},
 			},
 			AAAA: []*dns.AAAA{
 				{AAAA: net.IP{0x2a, 0x09, 0x82, 0x80, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x1C, 0xC1, 0xC1}},
