@@ -2,6 +2,7 @@ package certs
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -15,14 +16,32 @@ import (
 )
 
 type certsClient struct {
-	legoClient      *lego.Client
-	lastCertificate *certificate.Resource
+	legoClient              *lego.Client
+	lastWildcardCertificate *certificate.Resource
+	lastRootCertificate     *certificate.Resource
 }
 
-func (c *certsClient) RequestCertificate() {
-	log.Println("requesting a certificate")
-	if c.lastCertificate != nil {
-		certificates, err := certcrypto.ParsePEMBundle(c.lastCertificate.Certificate)
+func (c *certsClient) RequestCertificates() {
+	c.requestCertificate("wildcard")
+	c.requestCertificate("root")
+}
+
+func (c *certsClient) requestCertificate(certType string) {
+	var lastCertificate *certificate.Resource
+	var domains []string
+	if certType == "wildcard" {
+		lastCertificate = c.lastWildcardCertificate
+		domains = []string{"*.local-ip.sh"}
+	} else if certType == "root" {
+		lastCertificate = c.lastRootCertificate
+		domains = []string{"local-ip.sh"}
+	} else {
+		log.Fatalf("Unexpected certType %s. Only \"wildcard\" and \"root\" are supported", certType)
+	}
+
+	log.Printf("requesting %s certificate\n", certType)
+	if lastCertificate != nil {
+		certificates, err := certcrypto.ParsePEMBundle(c.lastWildcardCertificate.Certificate)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -34,45 +53,55 @@ func (c *certsClient) RequestCertificate() {
 			return
 		}
 
-		c.renewCertificate()
+		c.renewCertificates()
 		return
 	}
 
 	certificates, err := c.legoClient.Certificate.Obtain(certificate.ObtainRequest{
-		Domains: []string{"*.local-ip.sh"},
+		Domains: domains,
 		Bundle:  true,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	c.lastCertificate = certificates
+	if certType == "wildcard" {
+		c.lastWildcardCertificate = certificates
+	} else if certType == "root" {
+		c.lastRootCertificate = certificates
+	}
 
-	persistFiles(certificates)
-	log.Printf("%#v\n", certificates)
+	persistFiles(certificates, certType)
+
 }
 
-func (c *certsClient) renewCertificate() {
+func (c *certsClient) renewCertificates() {
 	log.Println("renewing currently existing certificate")
-	certificates, err := c.legoClient.Certificate.Renew(*c.lastCertificate, true, false, "")
+	wildcardCertificate, err := c.legoClient.Certificate.Renew(*c.lastWildcardCertificate, true, false, "")
 	if err != nil {
 		log.Fatal(err)
 	}
+	c.lastWildcardCertificate = wildcardCertificate
+	persistFiles(wildcardCertificate, "wildcard")
 
-	c.lastCertificate = certificates
+	rootCertificate, err := c.legoClient.Certificate.Renew(*c.lastRootCertificate, true, false, "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c.lastRootCertificate = rootCertificate
+	persistFiles(rootCertificate, "root")
 
-	persistFiles(certificates)
-	log.Printf("%#v\n", certificates)
 }
 
-func persistFiles(certificates *certificate.Resource) {
-	os.WriteFile("/certs/server.pem", certificates.Certificate, 0o644)
-	os.WriteFile("/certs/server.key", certificates.PrivateKey, 0o644)
+func persistFiles(certificates *certificate.Resource, certType string) {
+	os.MkdirAll(fmt.Sprintf("/certs/%s", certType), 0o755)
+	os.WriteFile(fmt.Sprintf("/certs/%s/server.pem", certType), certificates.Certificate, 0o644)
+	os.WriteFile(fmt.Sprintf("/certs/%s/server.key", certType), certificates.PrivateKey, 0o644)
 	jsonBytes, err := json.MarshalIndent(certificates, "", "\t")
 	if err != nil {
 		log.Fatal(err)
 	}
-	os.WriteFile("/certs/output.json", jsonBytes, 0o644)
+	os.WriteFile(fmt.Sprintf("/certs/%s/output.json", certType), jsonBytes, 0o644)
 }
 
 func NewCertsClient(xip *xip.Xip, user *Account) *certsClient {
@@ -86,16 +115,18 @@ func NewCertsClient(xip *xip.Xip, user *Account) *certsClient {
 	provider := newProviderLocalIp(xip)
 	legoClient.Challenge.SetDNS01Provider(provider, dns01.AddRecursiveNameservers([]string{"1.1.1.1:53", "8.8.8.8:53"}), dns01.DisableCompletePropagationRequirement())
 
-	lastCertificate := getLastCertificate(legoClient)
+	lastWildcardCertificate := getLastCertificate(legoClient, "wildcard")
+	lastRootCertificate := getLastCertificate(legoClient, "root")
 
 	return &certsClient{
 		legoClient,
-		lastCertificate,
+		lastWildcardCertificate,
+		lastRootCertificate,
 	}
 }
 
-func getLastCertificate(legoClient *lego.Client) *certificate.Resource {
-	jsonBytes, err := os.ReadFile("/certs/output.json")
+func getLastCertificate(legoClient *lego.Client, certType string) *certificate.Resource {
+	jsonBytes, err := os.ReadFile(fmt.Sprintf("/certs/%s/output.json", certType))
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			return nil

@@ -10,6 +10,7 @@ import (
 const (
 	email    = "admin@local-ip.sh"
 	caDirUrl = lego.LEDirectoryProduction
+	// caDirUrl = lego.LEDirectoryStaging
 )
 
 var (

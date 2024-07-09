@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charSet="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1" />
+    <title>local-ip.sh</title>
+    <meta name="description" content="local-ip.sh is a magic domain name that provides wildcard DNS for any IP address." />
+    <meta name="author" content="Mokhtar Mial" />
+    <meta name="robots" content="index,follow" />
+    <meta name="googlebot" content="index,follow" />
+    <meta property="twitter:title" content="local-ip.sh" />
+    <meta property="twitter:description" content="local-ip.sh is a magic domain name that provides wildcard DNS for any IP address." />
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:site" content="https://local-ip.sh/" />
+    <meta property="twitter:image" content="https://local-ip.sh/og.png" />
+    <meta property="twitter:image:alt" content="og image" />
+    <meta property="og:title" content="local-ip.sh" />
+    <meta property="og:description" content="local-ip.sh is a magic domain name that provides wildcard DNS for any IP address." />
+    <meta property="og:url" content="https://local-ip.sh/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://local-ip.sh/og.png" />
+    <meta property="og:image:alt" content="og image" />
+    <link rel="stylesheet" href="/styles.css" />
+</head>
+
+<body>
+    <header>
+        <pre>
+  _                 _       _            _
+ | |               | |     (_)          | |
+ | | ___   ___ __ _| |      _ _ __   ___| |__
+ | |/ _ \ / __/ _` | |_____| | &#x27;_ \ / __| &#x27;_ \
+ | | (_) | (_| (_| | |_____| | |_) |\__ \ | | |
+ |_|\___/ \___\__,_|_|     |_| .__(_)___/_| |_|
+                             | |
+                             |_|
+        </pre>
+    </header>
+    <main>
+        <section>
+            <header><strong>What is local-ip.sh?</strong></header>
+            <main>
+                <article>local-ip.sh is a magic domain name that provides wildcard DNS for any IP address. It is heavily
+                    inspired by <a href="http://local-ip.co">local-ip.co</a>, <a
+                        href="https://sslip.io">sslip.io</a>, and <a href="https://xip.io">xip.io</a>.</article>
+                <article>Quick example, say your LAN IP address is <strong>192.168.1.10</strong>. Using
+                    local-ip.sh,<br /><br />
+                    <pre>       <strong>192.168.1.10</strong>.local-ip.sh resolves to 192.168.1.10
+     dots.<strong>192.168.1.10</strong>.local-ip.sh resolves to 192.168.1.10
+   dashes.<strong>192-168-1-10</strong>.local-ip.sh resolves to 192.168.1.10</pre>
+                </article>
+                <article>...and so on. You can use these domains to access virtual hosts on your development web server
+                    from devices on your local network. No configuration required!</article>
+                <article>The best part is, you can serve your content over HTTPS with our TLS certificate for
+                    <code>*.local-ip.sh</code>:<ul>
+                        <li><a href="/server.pem">server.pem</a></li>
+                        <li><a href="/server.key">server.key</a></li>
+                    </ul>Be aware that wildcard certificates are not recursive, meaning they don&#x27;t match
+                    &quot;sub-subdomains&quot;. <br />In our case, this certificate will only match subdomains of
+                    <code>local-ip.sh</code> such as <code>192-168-1-10.local-ip.sh</code> where dashes separate
+                    the numbers that make up the IP address.</article>
+            </main>
+        </section>
+        <section>
+            <header><strong>How does it work?</strong></header>
+            <main>
+                <article>
+                    local-ip.sh runs publicly a <a href="https://git.capsulecorp.dev/mokhtar/local-ip.sh">custom DNS server</a>.
+                    When your computer looks up a local-ip.sh domain, the local-ip.sh DNS server resolves to the IP address it extracts from the domain.
+                </article>
+                <article>
+                    The TLS certificate is obtained from Let&#x27;s Encrypt and renewed up to a month before it expires.
+                </article>
+            </main>
+        </section>
+    </main>
+    <footer class="copyright">© 2024 <a href="https://www.mokhtar.dev">Mokhtar Mial</a></footer>
+    <script>
+        (function () {
+            window.counterscale = {
+                q: [["set", "siteId", "local-ip"], ["trackPageview"]],
+            };
+        })();
+    </script>
+    <script id="counterscale-script" src="https://counterscale.m5r.workers.dev/tracker.js" defer=""></script>
+</body>
+
+</html>

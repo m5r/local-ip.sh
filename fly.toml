@@ -20,14 +20,6 @@ PORT = "53"
 source = "certs"
 destination = "/certs"
 
-[http_service]
-internal_port = 53
-force_https = true
-auto_stop_machines = false
-auto_start_machines = true
-min_machines_running = 1
-processes = ["app"]
-
 [[services]]
 protocol = "udp"
 internal_port = 53
@@ -38,7 +30,33 @@ min_machines_running = 0
 [[services.ports]]
 port = 53
 
+[[services]]
+protocol = "tcp"
+internal_port = 80
+
+[[services.ports]]
+port = 80
+
+[[services]]
+protocol = "tcp"
+internal_port = 443
+
+[[services.ports]]
+port = 443
+
+# [[services.http_checks]]
+# interval = 10000
+# grace_period = "30s"
+# method = "get"
+# path = "/"
+# protocol = "https"
+# timeout = 15000
+# tls_skip_verify = false
+# tls_server_name = "local-ip.sh"
+# [services.http_checks.headers]
+
 [[vm]]
+size = "shared-cpu-1x"
 cpu_kind = "shared"
 cpus = 1
 memory_mb = 256

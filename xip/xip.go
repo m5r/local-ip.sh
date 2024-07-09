@@ -23,6 +23,7 @@ type HardcodedRecord struct {
 	TXT   *dns.TXT
 	MX    []*dns.MX
 	CNAME []*dns.CNAME
+	SRV   *dns.SRV
 }
 
 const (
@@ -54,47 +55,45 @@ var (
 		},
 		"local-ip.sh.": {
 			A: []*dns.A{
-				{A: net.IPv4(66, 241, 125, 48)},
-			},
-			AAAA: []*dns.AAAA{
-				{AAAA: net.IP{0x2a, 0x09, 0x82, 0x80, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x1C, 0xC1, 0xC1}},
+				// {A: net.IPv4(66, 241, 125, 48)},
+				{A: net.IPv4(137, 66, 40, 11)}, // fly.io edge-only ip address
 			},
 			TXT: &dns.TXT{
 				Txt: []string{
 					"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf",
-					"v=spf1 include:simplelogin.co ~all",
+					"v=spf1 include:capsulecorp.dev ~all",
 				},
 			},
 			MX: []*dns.MX{
-				{Preference: 10, Mx: "mx1.simplelogin.co."},
-				{Preference: 20, Mx: "mx2.simplelogin.co."},
+				{Preference: 10, Mx: "email.capsulecorp.dev."},
+			},
+		},
+		"autodiscover.local-ip.sh.": {
+			CNAME: []*dns.CNAME{
+				{Target: "email.capsulecorp.dev"},
+			},
+		},
+		"_autodiscover._tcp.local-ip.sh.": {
+			SRV: &dns.SRV{
+				Target: "email.capsulecorp.dev 443",
+			},
+		},
+		"autoconfig.local-ip.sh.": {
+			CNAME: []*dns.CNAME{
+				{Target: "email.capsulecorp.dev"},
 			},
 		},
 		"_dmarc.local-ip.sh.": {
 			TXT: &dns.TXT{
-				Txt: []string{"v=DMARC1; p=quarantine; pct=100; adkim=s; aspf=s"},
+				Txt: []string{"v=DMARC1; p=none; rua=mailto:postmaster@local-ip.sh; ruf=mailto:admin@local-ip.sh"},
 			},
 		},
 		"dkim._domainkey.local-ip.sh.": {
-			CNAME: []*dns.CNAME{
-				{Target: "dkim._domainkey.simplelogin.co."},
-			},
-		},
-		"dkim02._domainkey.local-ip.sh.": {
-			CNAME: []*dns.CNAME{
-				{Target: "dkim02._domainkey.simplelogin.co."},
-			},
-		},
-		"dkim03._domainkey.local-ip.sh.": {
-			CNAME: []*dns.CNAME{
-				{Target: "dkim03._domainkey.simplelogin.co."},
+			TXT: &dns.TXT{
+				Txt: []string{"v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMW6NFo34qzKRPbzK41GwbWncB8IDg1i2eA2VWznIVDmTzzsqILaBOGv2xokVpzZm0QRF9wSbeVUmvwEeQ7Z6wkfMjawenDEc3XxsNSvQUVBP6LU/xcm1zsR8wtD8r5J+Jm45pNFaateiM/kb/Eypp2ntdtd8CPsEgCEDpNb62LWdy0yzRdZ/M/fNn51UMN8hVFp4YfZngAt3bQwa6kPtgvTeqEbpNf5xanpDysNJt2S8zfqJMVGvnr8JaJiTv7ZlKMMp94aC5Ndcir1WbMyfmgSnGgemuCTVMWDGPJnXDi+8BQMH1b1hmTpWDiVdVlehyyWx5AfPrsWG9cEuDIfXwIDAQAB"},
 			},
 		},
 		"_acme-challenge.local-ip.sh.": {
-			// required for fly.io to obtain a certificate for the website
-			CNAME: []*dns.CNAME{
-				{Target: "local-ip.sh.zzkxm3.flydns.net."},
-			},
 			// will be filled in later when requesting the wildcard certificate
 			TXT: &dns.TXT{},
 		},
@@ -365,7 +364,6 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 }
 
 func (xip *Xip) StartServer() {
-	log.Printf("Listening on %s\n", xip.server.Addr)
 	err := xip.server.ListenAndServe()
 	defer xip.server.Shutdown()
 	if err != nil {
@@ -383,6 +381,7 @@ func (xip *Xip) StartServer() {
 
 		log.Fatalf("Failed to start server: %s\n ", err.Error())
 	}
+	log.Printf("Listening on %s\n", xip.server.Addr)
 }
 
 func NewXip(port int) (xip *Xip) {

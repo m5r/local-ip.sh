@@ -1,0 +1,107 @@
+html {
+	background: #111;
+}
+
+body {
+	color: #728ea7;
+	display: flex;
+	flex-direction: column;
+	margin-inline: auto;
+	padding-left: 1.5em;
+	padding-right: 1.5em;
+	width: min(100%, 41.5rem);
+	margin-top: 50px;
+	margin-bottom: 50px;
+
+	font-family: ui-monospace, monospace;
+	font-size: 18px;
+	font-weight: bold;
+
+	-webkit-font-smoothing: antialiased;
+}
+
+header {
+	color: #7aa6da;
+	display: flex;
+}
+
+header > pre {
+	margin: 1rem auto;
+}
+
+main a {
+	color: #728ea7;
+}
+
+main a:hover {
+	background: #7aa6da;
+	color: #111;
+	text-decoration: none;
+}
+
+section:nth-child(n + 2) {
+	margin-top: 3rem;
+}
+
+section > main {
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	row-gap: 2rem;
+}
+
+code {
+	padding: 0.2em 0.4em;
+	margin: 0;
+	font-size: 85%;
+	background-color: rgba(27, 31, 35, 0.95);
+	border-radius: 3px;
+	white-space: nowrap;
+}
+
+header span.dim {
+	color: #728ea7;
+}
+
+section strong {
+	color: #7aa6da;
+}
+
+footer {
+	margin: 5rem auto 0;
+	color: #556a7d;
+}
+
+footer a {
+	color: inherit;
+}
+
+footer a:hover {
+	color: #728ea7;
+}
+
+div.cursor {
+	display: inline-block;
+	background: #111;
+	margin-left: 1px;
+	margin-right: -1px;
+	animation: blink 2s linear 0s infinite;
+}
+
+@keyframes blink {
+	0% {
+		background: #7aa6da;
+	}
+	47% {
+		background: #728ea7;
+	}
+	50% {
+		background: #111;
+	}
+	97% {
+		background: #111;
+	}
+	100% {
+		background: #728ea7;
+	}
+}

@@ -20,16 +20,16 @@ func main() {
 		certsClient := certs.NewCertsClient(n, account)
 
 		time.Sleep(5 * time.Second)
-		certsClient.RequestCertificate()
+		certsClient.RequestCertificates()
 
 		for {
 			// try to renew certificate every day
 			time.Sleep(24 * time.Hour)
-			certsClient.RequestCertificate()
+			certsClient.RequestCertificates()
 		}
 	}()
 
-	go http.ServeCertificate()
+	go http.ServeHttp()
 
 	n.StartServer()
 }

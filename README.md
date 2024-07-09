@@ -39,7 +39,7 @@ as a proxy to access the files securely.
 
 ## Self-hosting
 
-I'm currently hosting [local-ip.sh](https://www.local-ip.sh) at [Fly.io](https://fly.io) but you can host the service yourself
+I'm currently hosting [local-ip.sh](https://local-ip.sh) at [Fly.io](https://fly.io) but you can host the service yourself
 if you're into that kind of thing. Note that you will need to edit your domain's glue records so make sure your registrar allows it.
 
 You will essentially need to:

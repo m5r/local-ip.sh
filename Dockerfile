@@ -10,12 +10,13 @@ FROM gcr.io/distroless/base-debian12:latest
 
 ENV PORT 53
 
-WORKDIR /
+WORKDIR /app
 
-COPY --from=build /app/local-ip /
-COPY ./.lego /.lego
+COPY --from=build /app/local-ip /app/local-ip
+COPY --from=build /app/http/static /app/http/static
+COPY ./.lego /app/.lego
 
 EXPOSE $PORT
 USER root
 
-CMD ["/local-ip"]
+CMD ["/app/local-ip"]
