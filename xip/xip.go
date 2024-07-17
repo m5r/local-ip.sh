@@ -20,7 +20,7 @@ type Xip struct {
 type HardcodedRecord struct {
 	A     []*dns.A
 	AAAA  []*dns.AAAA
-	TXT   *dns.TXT
+	TXT   []string // *dns.TXT
 	MX    []*dns.MX
 	CNAME []*dns.CNAME
 	SRV   *dns.SRV
@@ -58,44 +58,40 @@ var (
 				// {A: net.IPv4(66, 241, 125, 48)},
 				{A: net.IPv4(137, 66, 40, 11)}, // fly.io edge-only ip address
 			},
-			TXT: &dns.TXT{
-				Txt: []string{
-					"sl-verification=frudknyqpqlpgzbglkqnsmorfcvxrf",
-					"v=spf1 include:capsulecorp.dev ~all",
-				},
-			},
+			TXT: []string{"v=spf1 include:capsulecorp.dev ~all"},
 			MX: []*dns.MX{
 				{Preference: 10, Mx: "email.capsulecorp.dev."},
 			},
 		},
 		"autodiscover.local-ip.sh.": {
 			CNAME: []*dns.CNAME{
-				{Target: "email.capsulecorp.dev"},
+				{Target: "email.capsulecorp.dev."},
 			},
 		},
 		"_autodiscover._tcp.local-ip.sh.": {
 			SRV: &dns.SRV{
-				Target: "email.capsulecorp.dev 443",
+				Priority: 0,
+				Weight:   0,
+				Port:     443,
+				Target:   "email.capsulecorp.dev.",
 			},
 		},
 		"autoconfig.local-ip.sh.": {
 			CNAME: []*dns.CNAME{
-				{Target: "email.capsulecorp.dev"},
+				{Target: "email.capsulecorp.dev."},
 			},
 		},
 		"_dmarc.local-ip.sh.": {
-			TXT: &dns.TXT{
-				Txt: []string{"v=DMARC1; p=none; rua=mailto:postmaster@local-ip.sh; ruf=mailto:admin@local-ip.sh"},
-			},
+			TXT: []string{"v=DMARC1; p=none; rua=mailto:postmaster@local-ip.sh; ruf=mailto:admin@local-ip.sh"},
 		},
 		"dkim._domainkey.local-ip.sh.": {
-			TXT: &dns.TXT{
-				Txt: []string{"v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMW6NFo34qzKRPbzK41GwbWncB8IDg1i2eA2VWznIVDmTzzsqILaBOGv2xokVpzZm0QRF9wSbeVUmvwEeQ7Z6wkfMjawenDEc3XxsNSvQUVBP6LU/xcm1zsR8wtD8r5J+Jm45pNFaateiM/kb/Eypp2ntdtd8CPsEgCEDpNb62LWdy0yzRdZ/M/fNn51UMN8hVFp4YfZngAt3bQwa6kPtgvTeqEbpNf5xanpDysNJt2S8zfqJMVGvnr8JaJiTv7ZlKMMp94aC5Ndcir1WbMyfmgSnGgemuCTVMWDGPJnXDi+8BQMH1b1hmTpWDiVdVlehyyWx5AfPrsWG9cEuDIfXwIDAQAB"},
+			TXT: []string{
+				"v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMW6NFo34qzKRPbzK41GwbWncB8IDg1i2eA2VWznIVDmTzzsqILaBOGv2xokVpzZm0QRF9wSbeVUmvwEeQ7Z6wkfMjawenDEc3XxsNSvQUVBP6LU/xcm1zsR8wtD8r5J+Jm45pNFaateiM/kb/Eypp2ntdtd8CPsEgCEDpNb62LWdy0yzRdZ/M/fNn51UMN8hVFp4YfZngAt3bQwa6kPtgvTeqEbpNf5xanpDysNJt2S8zfqJMVGvnr8JaJiTv7ZlKMMp94aC5Ndcir1WbMyfmgSnGgemuCTVMWDGPJnXDi+8BQMH1b1hmTpWDiVdVlehyyWx5AfPrsWG9cEuDIfXwIDAQAB",
 			},
 		},
 		"_acme-challenge.local-ip.sh.": {
 			// will be filled in later when requesting the wildcard certificate
-			TXT: &dns.TXT{},
+			TXT: []string{},
 		},
 	}
 )
@@ -108,9 +104,7 @@ func (xip *Xip) SetTXTRecord(fqdn string, value string) {
 	}
 
 	if records, ok := hardcodedRecords[fqdn]; ok {
-		records.TXT = &dns.TXT{
-			Txt: []string{value},
-		}
+		records.TXT = []string{value}
 		hardcodedRecords["_acme-challenge.local-ip.sh."] = records
 	}
 }
@@ -123,19 +117,20 @@ func (xip *Xip) UnsetTXTRecord(fqdn string) {
 	}
 
 	if records, ok := hardcodedRecords[fqdn]; ok {
-		records.TXT = nil
+		records.TXT = []string{}
 		hardcodedRecords["_acme-challenge.local-ip.sh."] = records
 	}
 }
 
 func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
-	if hardcodedRecords[strings.ToLower(fqdn)].A != nil {
+	normalizedFqdn := strings.ToLower(fqdn)
+	if hardcodedRecords[normalizedFqdn].A != nil {
 		var records []*dns.A
 
-		for _, record := range hardcodedRecords[strings.ToLower(fqdn)].A {
+		for _, record := range hardcodedRecords[normalizedFqdn].A {
 			records = append(records, &dns.A{
 				Hdr: dns.RR_Header{
-					Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+					Ttl:    uint32((time.Minute * 5).Seconds()),
 					Name:   fqdn,
 					Rrtype: dns.TypeA,
 					Class:  dns.ClassINET,
@@ -158,7 +153,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 
 			return []*dns.A{{
 				Hdr: dns.RR_Header{
-					Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+					Ttl:    uint32((time.Minute * 5).Seconds()),
 					Name:   fqdn,
 					Rrtype: dns.TypeA,
 					Class:  dns.ClassINET,
@@ -193,15 +188,16 @@ func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 
 func (xip *Xip) handleAAAA(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
-	if hardcodedRecords[strings.ToLower(fqdn)].AAAA == nil {
+	normalizedFqdn := strings.ToLower(fqdn)
+	if hardcodedRecords[normalizedFqdn].AAAA == nil {
 		xip.answerWithAuthority(question, message)
 		return
 	}
 
-	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].AAAA {
+	for _, record := range hardcodedRecords[normalizedFqdn].AAAA {
 		message.Answer = append(message.Answer, &dns.AAAA{
 			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Minute * 5).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeAAAA,
 				Class:  dns.ClassINET,
@@ -218,7 +214,7 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 	for _, ns := range xip.nameServers {
 		nameServers = append(nameServers, &dns.NS{
 			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Minute * 5).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeNS,
 				Class:  dns.ClassINET,
@@ -238,35 +234,46 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 	}
 }
 
+func chunkBy(str string, chunkSize int) (chunks []string) {
+	for chunkSize < len(str) {
+		str, chunks = str[chunkSize:], append(chunks, str[0:chunkSize])
+	}
+	return append(chunks, str)
+}
+
 func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
-	if hardcodedRecords[strings.ToLower(fqdn)].TXT == nil {
+	normalizedFqdn := strings.ToLower(fqdn)
+	if hardcodedRecords[normalizedFqdn].TXT == nil {
 		xip.answerWithAuthority(question, message)
 		return
 	}
 
-	message.Answer = append(message.Answer, &dns.TXT{
-		Hdr: dns.RR_Header{
-			Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
-			Name:   fqdn,
-			Rrtype: dns.TypeTXT,
-			Class:  dns.ClassINET,
-		},
-		Txt: hardcodedRecords[strings.ToLower(fqdn)].TXT.Txt,
-	})
+	for _, record := range hardcodedRecords[normalizedFqdn].TXT {
+		message.Answer = append(message.Answer, &dns.TXT{
+			Hdr: dns.RR_Header{
+				Ttl:    uint32((time.Minute * 5).Seconds()),
+				Name:   fqdn,
+				Rrtype: dns.TypeTXT,
+				Class:  dns.ClassINET,
+			},
+			Txt: chunkBy(record, 255),
+		})
+	}
 }
 
 func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
-	if hardcodedRecords[strings.ToLower(fqdn)].MX == nil {
+	normalizedFqdn := strings.ToLower(fqdn)
+	if hardcodedRecords[normalizedFqdn].MX == nil {
 		xip.answerWithAuthority(question, message)
 		return
 	}
 
-	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].MX {
+	for _, record := range hardcodedRecords[normalizedFqdn].MX {
 		message.Answer = append(message.Answer, &dns.MX{
 			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Minute * 5).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeMX,
 				Class:  dns.ClassINET,
@@ -279,15 +286,16 @@ func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
 
 func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
-	if hardcodedRecords[strings.ToLower(fqdn)].CNAME == nil {
+	normalizedFqdn := strings.ToLower(fqdn)
+	if hardcodedRecords[normalizedFqdn].CNAME == nil {
 		xip.answerWithAuthority(question, message)
 		return
 	}
 
-	for _, record := range hardcodedRecords[strings.ToLower(fqdn)].CNAME {
+	for _, record := range hardcodedRecords[normalizedFqdn].CNAME {
 		message.Answer = append(message.Answer, &dns.CNAME{
 			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Hour * 24 * 7).Seconds()),
+				Ttl:    uint32((time.Minute * 5).Seconds()),
 				Name:   fqdn,
 				Rrtype: dns.TypeCNAME,
 				Class:  dns.ClassINET,
@@ -295,6 +303,28 @@ func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 			Target: record.Target,
 		})
 	}
+}
+
+func (xip *Xip) handleSRV(question dns.Question, message *dns.Msg) {
+	fqdn := question.Name
+	normalizedFqdn := strings.ToLower(fqdn)
+	if hardcodedRecords[normalizedFqdn].SRV == nil {
+		xip.answerWithAuthority(question, message)
+		return
+	}
+
+	message.Answer = append(message.Answer, &dns.SRV{
+		Hdr: dns.RR_Header{
+			Ttl:    uint32((time.Minute * 5).Seconds()),
+			Name:   fqdn,
+			Rrtype: dns.TypeSRV,
+			Class:  dns.ClassINET,
+		},
+		Priority: hardcodedRecords[normalizedFqdn].SRV.Priority,
+		Weight:   hardcodedRecords[normalizedFqdn].SRV.Weight,
+		Port:     hardcodedRecords[normalizedFqdn].SRV.Port,
+		Target:   hardcodedRecords[normalizedFqdn].SRV.Target,
+	})
 }
 
 func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
@@ -307,7 +337,7 @@ func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 		Name:     question.Name,
 		Rrtype:   dns.TypeSOA,
 		Class:    dns.ClassINET,
-		Ttl:      uint32((time.Hour * 24 * 7).Seconds()),
+		Ttl:      uint32((time.Minute * 5).Seconds()),
 		Rdlength: 0,
 	}
 	soa.Ns = "ns1.local-ip.sh."
@@ -336,6 +366,8 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 			xip.handleMX(question, message)
 		case dns.TypeCNAME:
 			xip.handleCNAME(question, message)
+		case dns.TypeSRV:
+			xip.handleSRV(question, message)
 		case dns.TypeSOA:
 			xip.handleSOA(question, message)
 		default:
@@ -359,7 +391,10 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 			message.MsgHdr.Rcode = dns.RcodeRefused
 		}
 
-		response.WriteMsg(message)
+		error := response.WriteMsg(message)
+		if error != nil {
+			log.Printf("Error writing answer \"%s\": %s\n", message.String(), error.Error())
+		}
 	}()
 }
 
