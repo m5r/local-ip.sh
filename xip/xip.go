@@ -18,11 +18,11 @@ type Xip struct {
 }
 
 type HardcodedRecord struct {
-	A     []*dns.A
-	AAAA  []*dns.AAAA
-	TXT   []string // *dns.TXT
+	A     []net.IP // => dns.A
+	AAAA  []net.IP // => dns.AAAA
+	TXT   []string // => dns.TXT
 	MX    []*dns.MX
-	CNAME []*dns.CNAME
+	CNAME []string // => dns.CNAME
 	SRV   *dns.SRV
 }
 
@@ -38,25 +38,24 @@ var (
 	hardcodedRecords = map[string]HardcodedRecord{
 		"ns.local-ip.sh.": {
 			// record holding ip addresses of ns1 and ns2
-			A: []*dns.A{
-				{A: net.IPv4(137, 66, 40, 11)},
-				{A: net.IPv4(137, 66, 40, 12)},
+			A: []net.IP{
+				net.IPv4(137, 66, 40, 11),
+				net.IPv4(137, 66, 40, 12),
 			},
 		},
 		"ns1.local-ip.sh.": {
-			A: []*dns.A{
-				{A: net.IPv4(137, 66, 40, 11)}, // fly.io edge-only ip address, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
+			A: []net.IP{
+				net.IPv4(137, 66, 40, 11), // fly.io edge-only ip address, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
 			},
 		},
 		"ns2.local-ip.sh.": {
-			A: []*dns.A{
-				{A: net.IPv4(137, 66, 40, 12)}, // fly.io edge-only ip address #2
+			A: []net.IP{
+				net.IPv4(137, 66, 40, 12), // fly.io edge-only ip address #2
 			},
 		},
 		"local-ip.sh.": {
-			A: []*dns.A{
-				// {A: net.IPv4(66, 241, 125, 48)},
-				{A: net.IPv4(137, 66, 40, 11)}, // fly.io edge-only ip address
+			A: []net.IP{
+				net.IPv4(137, 66, 40, 11), // fly.io edge-only ip address
 			},
 			TXT: []string{"v=spf1 include:capsulecorp.dev ~all"},
 			MX: []*dns.MX{
@@ -64,8 +63,8 @@ var (
 			},
 		},
 		"autodiscover.local-ip.sh.": {
-			CNAME: []*dns.CNAME{
-				{Target: "email.capsulecorp.dev."},
+			CNAME: []string{
+				"email.capsulecorp.dev.",
 			},
 		},
 		"_autodiscover._tcp.local-ip.sh.": {
@@ -77,8 +76,8 @@ var (
 			},
 		},
 		"autoconfig.local-ip.sh.": {
-			CNAME: []*dns.CNAME{
-				{Target: "email.capsulecorp.dev."},
+			CNAME: []string{
+				"email.capsulecorp.dev.",
 			},
 		},
 		"_dmarc.local-ip.sh.": {
@@ -135,7 +134,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 					Rrtype: dns.TypeA,
 					Class:  dns.ClassINET,
 				},
-				A: record.A,
+				A: record,
 			})
 		}
 
@@ -202,7 +201,7 @@ func (xip *Xip) handleAAAA(question dns.Question, message *dns.Msg) {
 				Rrtype: dns.TypeAAAA,
 				Class:  dns.ClassINET,
 			},
-			AAAA: record.AAAA,
+			AAAA: record,
 		})
 	}
 }
@@ -300,7 +299,7 @@ func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
 				Rrtype: dns.TypeCNAME,
 				Class:  dns.ClassINET,
 			},
-			Target: record.Target,
+			Target: record,
 		})
 	}
 }
