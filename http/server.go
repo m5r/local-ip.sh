@@ -1,14 +1,16 @@
 package http
 
 import (
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"local-ip.sh/utils"
 )
 
 func ServeHttp() {
+	utils.Logger.Info().Msg("Waiting until \"local-ip.sh\" certificate is delivered to start up HTTP server...")
 	waitForCertificate()
 
 	go http.ListenAndServe(":80", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,8 +46,12 @@ func ServeHttp() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		http.ServeFile(w, r, "./http/static/index.html")
 	})
-	log.Printf("Serving HTTPS server on :443\n")
-	http.ListenAndServeTLS(":443", "/certs/root/server.pem", "/certs/root/server.key", nil)
+
+	utils.Logger.Info().Msg("Starting up HTTPS server on :443\n")
+	err := http.ListenAndServeTLS(":443", "/certs/root/server.pem", "/certs/root/server.key", nil)
+	if err != nil {
+		utils.Logger.Fatal().Err(err).Msg("Failed to start HTTPS server")
+	}
 }
 
 func waitForCertificate() {
@@ -56,7 +62,7 @@ func waitForCertificate() {
 				time.Sleep(1 * time.Second)
 				continue
 			}
-			log.Fatal(err)
+			utils.Logger.Fatal().Err(err).Msg("Unexpected error while looking for /certs/root/output.json")
 		}
 		break
 	}

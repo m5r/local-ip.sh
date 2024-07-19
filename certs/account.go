@@ -8,13 +8,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
+	"local-ip.sh/utils"
 )
 
 type Account struct {
@@ -42,28 +42,28 @@ func LoadAccount() *Account {
 			RegisterAccount()
 			return LoadAccount()
 		}
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to load account from existing file")
 	}
+
 	account := &Account{}
 	err = json.Unmarshal(jsonBytes, account)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to unmarshal account JSON file")
 	}
 
 	privKey, err := os.ReadFile(keyFilePath)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to read account's private key file")
 	}
-	privateKey := decode(string(privKey))
 
-	account.key = privateKey
+	account.key = decode(string(privKey))
 	return account
 }
 
 func RegisterAccount() {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to generate account key")
 	}
 
 	account := &Account{
@@ -74,35 +74,39 @@ func RegisterAccount() {
 	config.CADirURL = caDirUrl
 	legoClient, err := lego.NewClient(config)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Str("CA Directory URL", config.CADirURL).Msg("Failed to initialize lego client")
 	}
 
 	reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Str("CA Directory URL", config.CADirURL).Msg("Failed to register account to ACME server")
 	}
 	if reg.Body.Status != "valid" {
-		log.Fatalf("registration failed with status %s", reg.Body.Status)
+		utils.Logger.Fatal().Err(err).Str("CA Directory URL", config.CADirURL).Msgf("Registration failed with status %s", reg.Body.Status)
 	}
-	log.Println(reg.Body.TermsOfServiceAgreed)
+
+	utils.Logger.Debug().
+		Str("CA Directory URL", config.CADirURL).
+		Bool("TermsOfServiceAgreed", reg.Body.TermsOfServiceAgreed).
+		Msg("Successfully registered account to ACME server")
 	account.Registration = reg
 
 	os.MkdirAll(filepath.Dir(keyFilePath), os.ModePerm)
 	privKey := encode(privateKey)
 	err = os.WriteFile(keyFilePath, []byte(privKey), 0o644)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Str("path", keyFilePath).Msg("Failed to write account's private key file")
 	}
 
 	jsonBytes, err := json.MarshalIndent(account, "", "\t")
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to marshal account JSON file")
 	}
 
 	os.MkdirAll(filepath.Dir(accountFilePath), os.ModePerm)
 	err = os.WriteFile(accountFilePath, jsonBytes, 0o600)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Str("path", accountFilePath).Msg("Failed to write account's JSON file")
 	}
 }
 

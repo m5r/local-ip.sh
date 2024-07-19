@@ -3,7 +3,6 @@ package certs
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
+	"local-ip.sh/utils"
 	"local-ip.sh/xip"
 )
 
@@ -36,20 +36,20 @@ func (c *certsClient) requestCertificate(certType string) {
 		lastCertificate = c.lastRootCertificate
 		domains = []string{"local-ip.sh"}
 	} else {
-		log.Fatalf("Unexpected certType %s. Only \"wildcard\" and \"root\" are supported", certType)
+		utils.Logger.Fatal().Msgf("Unexpected certType %s. Only \"wildcard\" and \"root\" are supported", certType)
 	}
 
-	log.Printf("requesting %s certificate\n", certType)
+	utils.Logger.Info().Str("certType", certType).Msg("Requesting certificate")
 	if lastCertificate != nil {
 		certificates, err := certcrypto.ParsePEMBundle(c.lastWildcardCertificate.Certificate)
 		if err != nil {
-			log.Fatal(err)
+			utils.Logger.Fatal().Err(err).Msg("Failed to parse PEM bundle from last certificate")
 		}
 
 		x509Cert := certificates[0]
 		timeLeft := x509Cert.NotAfter.Sub(time.Now().UTC())
 		if timeLeft > time.Hour*24*30 {
-			log.Printf("%d days left before expiration, will not renew", int(timeLeft.Hours()/24))
+			utils.Logger.Info().Msgf("%d days left before expiration, skip renewal", int(timeLeft.Hours()/24))
 			return
 		}
 
@@ -57,36 +57,34 @@ func (c *certsClient) requestCertificate(certType string) {
 		return
 	}
 
-	certificates, err := c.legoClient.Certificate.Obtain(certificate.ObtainRequest{
-		Domains: domains,
-		Bundle:  true,
-	})
+	cert, err := c.legoClient.Certificate.Obtain(certificate.ObtainRequest{Domains: domains, Bundle: true})
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to obtain certificate from lego client")
 	}
 
 	if certType == "wildcard" {
-		c.lastWildcardCertificate = certificates
+		c.lastWildcardCertificate = cert
 	} else if certType == "root" {
-		c.lastRootCertificate = certificates
+		c.lastRootCertificate = cert
 	}
 
-	persistFiles(certificates, certType)
+	persistFiles(cert, certType)
 
 }
 
 func (c *certsClient) renewCertificates() {
-	log.Println("renewing currently existing certificate")
+	utils.Logger.Info().Msg("Renewing certificates")
+
 	wildcardCertificate, err := c.legoClient.Certificate.Renew(*c.lastWildcardCertificate, true, false, "")
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to renew wildcard certificate")
 	}
 	c.lastWildcardCertificate = wildcardCertificate
 	persistFiles(wildcardCertificate, "wildcard")
 
 	rootCertificate, err := c.legoClient.Certificate.Renew(*c.lastRootCertificate, true, false, "")
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to renew root certificate")
 	}
 	c.lastRootCertificate = rootCertificate
 	persistFiles(rootCertificate, "root")
@@ -94,14 +92,30 @@ func (c *certsClient) renewCertificates() {
 }
 
 func persistFiles(certificates *certificate.Resource, certType string) {
-	os.MkdirAll(fmt.Sprintf("/certs/%s", certType), 0o755)
-	os.WriteFile(fmt.Sprintf("/certs/%s/server.pem", certType), certificates.Certificate, 0o644)
+	err := os.MkdirAll(fmt.Sprintf("/certs/%s", certType), 0o755)
+	if err != nil {
+		utils.Logger.Fatal().Err(err).Msgf("Failed to mkdir /certs/%s", certType)
+	}
+
+	err = os.WriteFile(fmt.Sprintf("/certs/%s/server.pem", certType), certificates.Certificate, 0o644)
+	if err != nil {
+		utils.Logger.Fatal().Err(err).Msgf("Failed to save /certs/%s/server.pem", certType)
+	}
+
 	os.WriteFile(fmt.Sprintf("/certs/%s/server.key", certType), certificates.PrivateKey, 0o644)
+	if err != nil {
+		utils.Logger.Fatal().Err(err).Msgf("Failed to save /certs/%s/server.key", certType)
+	}
+
 	jsonBytes, err := json.MarshalIndent(certificates, "", "\t")
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to marshal certificates to JSON")
 	}
-	os.WriteFile(fmt.Sprintf("/certs/%s/output.json", certType), jsonBytes, 0o644)
+
+	err = os.WriteFile(fmt.Sprintf("/certs/%s/output.json", certType), jsonBytes, 0o644)
+	if err != nil {
+		utils.Logger.Fatal().Err(err).Msgf("Failed to save /certs/%s/output.json", certType)
+	}
 }
 
 func NewCertsClient(xip *xip.Xip, user *Account) *certsClient {
@@ -109,7 +123,7 @@ func NewCertsClient(xip *xip.Xip, user *Account) *certsClient {
 	config.CADirURL = caDirUrl
 	legoClient, err := lego.NewClient(config)
 	if err != nil {
-		log.Fatal(err)
+		utils.Logger.Fatal().Err(err).Msg("Failed to initialize lego client")
 	}
 
 	provider := newProviderLocalIp(xip)
@@ -131,23 +145,20 @@ func getLastCertificate(legoClient *lego.Client, certType string) *certificate.R
 		if strings.Contains(err.Error(), "no such file or directory") {
 			return nil
 		}
-		log.Println(err)
-		log.Println("falling back to getting a brand new cert")
+		utils.Logger.Error().Err(err).Msg("Failling back to getting a brand new cert")
 		return nil
 	}
 
 	lastCertificate := &certificate.Resource{}
 	err = json.Unmarshal(jsonBytes, lastCertificate)
 	if err != nil {
-		log.Println(err)
-		log.Println("falling back to getting a brand new cert")
+		utils.Logger.Error().Err(err).Msg("Failling back to getting a brand new cert")
 		return nil
 	}
 
 	lastCertificate, err = legoClient.Certificate.Get(lastCertificate.CertURL, true)
 	if err != nil {
-		log.Println(err)
-		log.Println("falling back to getting a brand new cert")
+		utils.Logger.Error().Err(err).Msg("Failling back to getting a brand new cert")
 		return nil
 	}
 

@@ -2,7 +2,6 @@ package xip
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"regexp"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"local-ip.sh/utils"
 )
 
 type Xip struct {
@@ -96,9 +96,9 @@ var (
 )
 
 func (xip *Xip) SetTXTRecord(fqdn string, value string) {
-	log.Printf("trying to set TXT record \"%s\" for fqdn \"%s\"", value, fqdn)
+	utils.Logger.Debug().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
 	if fqdn != "_acme-challenge.local-ip.sh." {
-		log.Println("not allowed, abort")
+		utils.Logger.Debug().Msg("Not allowed, abort")
 		return
 	}
 
@@ -109,9 +109,9 @@ func (xip *Xip) SetTXTRecord(fqdn string, value string) {
 }
 
 func (xip *Xip) UnsetTXTRecord(fqdn string) {
-	log.Printf("trying to unset TXT record for fqdn \"%s\"", fqdn)
+	utils.Logger.Debug().Str("fqdn", fqdn).Msg("Trying to set TXT record")
 	if fqdn != "_acme-challenge.local-ip.sh." {
-		log.Println("not allowed, abort")
+		utils.Logger.Debug().Msg("Not allowed, abort")
 		return
 	}
 
@@ -180,7 +180,6 @@ func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	}
 
 	for _, record := range records {
-		log.Printf("(%s) %s => %s\n", flyRegion, fqdn, record.A)
 		message.Answer = append(message.Answer, record)
 	}
 }
@@ -390,14 +389,21 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 			message.MsgHdr.Rcode = dns.RcodeRefused
 		}
 
+		utils.Logger.Debug().Str("FLY_REGION", flyRegion).Any("question", request.Question).Any("answer", message.Answer).Msg("resolved")
+
 		error := response.WriteMsg(message)
 		if error != nil {
-			log.Printf("Error writing answer \"%s\": %s\n", message.String(), error.Error())
+			utils.Logger.Error().Err(error).Str("message", message.String()).Msg("Error responding to query")
 		}
 	}()
 }
 
 func (xip *Xip) StartServer() {
+	if _, exists := os.LookupEnv("FLY_APP_NAME"); exists {
+		// we're probably running on fly, bind to fly-global-services
+		xip.server.Addr = "fly-global-services" + xip.server.Addr
+	}
+
 	err := xip.server.ListenAndServe()
 	defer xip.server.Shutdown()
 	if err != nil {
@@ -413,9 +419,9 @@ func (xip *Xip) StartServer() {
 			return
 		}
 
-		log.Fatalf("Failed to start server: %s\n ", err.Error())
+		utils.Logger.Fatal().Err(err).Msg("Failed to start DNS server")
 	}
-	log.Printf("Listening on %s\n", xip.server.Addr)
+	utils.Logger.Info().Str("dns_address", xip.server.Addr).Msg("DNS server listening")
 }
 
 func NewXip(port int) (xip *Xip) {
@@ -426,7 +432,7 @@ func NewXip(port int) (xip *Xip) {
 	}
 
 	xip.server = dns.Server{
-		Addr: fmt.Sprintf("fly-global-services:%d", port),
+		Addr: fmt.Sprintf(":%d", port),
 		Net:  "udp",
 	}
 
