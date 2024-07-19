@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strings"
@@ -9,52 +10,53 @@ import (
 	"local-ip.sh/utils"
 )
 
-func ServeHttp() {
-	utils.Logger.Info().Msg("Waiting until \"local-ip.sh\" certificate is delivered to start up HTTP server...")
-	waitForCertificate()
-
-	go http.ListenAndServe(":80", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		url := r.URL
-		url.Host = r.Host
-		url.Scheme = "https"
-		http.Redirect(w, r, url.String(), http.StatusMovedPermanently)
-	}))
-
-	http.HandleFunc("/server.key", func(w http.ResponseWriter, r *http.Request) {
+func registerHandlers() {
+	http.HandleFunc("GET /server.key", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		http.ServeFile(w, r, "/certs/wildcard/server.key")
 	})
-	http.HandleFunc("/server.pem", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("GET /server.pem", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 		http.ServeFile(w, r, "/certs/wildcard/server.pem")
 	})
-	http.HandleFunc("/og.png", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("GET /og.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		http.ServeFile(w, r, "./http/static/og.png")
 	})
-	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		http.ServeFile(w, r, "./http/static/favicon.ico")
 	})
-	http.HandleFunc("/styles.css", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		http.ServeFile(w, r, "./http/static/styles.css")
 	})
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		http.ServeFile(w, r, "./http/static/index.html")
 	})
-
-	utils.Logger.Info().Msg("Starting up HTTPS server on :443\n")
-	err := http.ListenAndServeTLS(":443", "/certs/root/server.pem", "/certs/root/server.key", nil)
-	if err != nil {
-		utils.Logger.Fatal().Err(err).Msg("Failed to start HTTPS server")
-	}
 }
 
-func waitForCertificate() {
+func serveHttp() *http.Server {
+	utils.Logger.Info().Msg("Starting up HTTP server on :80")
+	httpServer := &http.Server{Addr: ":http"}
+	go func() {
+		err := httpServer.ListenAndServe()
+		if err != http.ErrServerClosed {
+			utils.Logger.Fatal().Err(err).Msg("Unexpected error received from HTTP server")
+		}
+	}()
+	return httpServer
+}
+
+func waitForCertificate(ready chan bool) {
 	for {
 		_, err := os.Stat("/certs/root/output.json")
 		if err != nil {
@@ -66,4 +68,52 @@ func waitForCertificate() {
 		}
 		break
 	}
+
+	ready <- true
+}
+
+func killServer(httpServer *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := httpServer.Shutdown(ctx)
+	if err != nil {
+		utils.Logger.Fatal().Err(err).Msg("Unexpected error when shutting down HTTP server")
+	}
+
+	utils.Logger.Debug().Msg("HTTP server shut down correctly")
+}
+
+func redirectHttpToHttps() {
+	utils.Logger.Info().Msg("Redirecting HTTP traffic from :80 to HTTPS :443")
+	httpServer := &http.Server{
+		Addr: ":http",
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			url := r.URL
+			url.Host = r.Host
+			url.Scheme = "https"
+			http.Redirect(w, r, url.String(), http.StatusMovedPermanently)
+		}),
+	}
+	go httpServer.ListenAndServe()
+}
+
+func serveHttps() {
+	utils.Logger.Info().Msg("Starting up HTTPS server on :443")
+	httpsServer := &http.Server{Addr: ":https"}
+	go httpsServer.ListenAndServeTLS("/certs/root/server.pem", "/certs/root/server.key")
+}
+
+func ServeHttp() {
+	registerHandlers()
+
+	httpServer := serveHttp()
+
+	ready := make(chan bool, 1)
+	go waitForCertificate(ready)
+	<-ready
+
+	killServer(httpServer)
+
+	serveHttps()
+	redirectHttpToHttps()
 }
