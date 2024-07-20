@@ -13,11 +13,11 @@ import (
 func registerHandlers() {
 	http.HandleFunc("GET /server.key", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
-		http.ServeFile(w, r, "/certs/wildcard/server.key")
+		http.ServeFile(w, r, "./.lego/certs/wildcard/server.key")
 	})
 	http.HandleFunc("GET /server.pem", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-x509-ca-cert")
-		http.ServeFile(w, r, "/certs/wildcard/server.pem")
+		http.ServeFile(w, r, "./.lego/certs/wildcard/server.pem")
 	})
 	http.HandleFunc("GET /og.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png; charset=utf-8")
@@ -58,13 +58,13 @@ func serveHttp() *http.Server {
 
 func waitForCertificate(ready chan bool) {
 	for {
-		_, err := os.Stat("/certs/root/output.json")
+		_, err := os.Stat("./.lego/certs/root/output.json")
 		if err != nil {
 			if strings.Contains(err.Error(), "no such file or directory") {
 				time.Sleep(1 * time.Second)
 				continue
 			}
-			utils.Logger.Fatal().Err(err).Msg("Unexpected error while looking for /certs/root/output.json")
+			utils.Logger.Fatal().Err(err).Msg("Unexpected error while looking for ./.lego/certs/root/output.json")
 		}
 		break
 	}
@@ -100,7 +100,7 @@ func redirectHttpToHttps() {
 func serveHttps() {
 	utils.Logger.Info().Msg("Starting up HTTPS server on :443")
 	httpsServer := &http.Server{Addr: ":https"}
-	go httpsServer.ListenAndServeTLS("/certs/root/server.pem", "/certs/root/server.key")
+	go httpsServer.ListenAndServeTLS("./.lego/certs/root/server.pem", "./.lego/certs/root/server.key")
 }
 
 func ServeHttp() {

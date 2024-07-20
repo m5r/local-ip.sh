@@ -17,8 +17,8 @@ auto_rollback = true
 PORT = "53"
 
 [mounts]
-source = "certs"
-destination = "/certs"
+source = "lego"
+destination = "/local-ip/.lego"
 
 [[services]]
 protocol = "udp"

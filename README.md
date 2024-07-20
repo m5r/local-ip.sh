@@ -1,6 +1,6 @@
 # local-ip.sh
 
-[local-ip.sh](https://local-ip.sh) is a magic domain name that provides wildcard DNS for any IP address.  
+[local-ip.sh](https://local-ip.sh) is a magic domain name that provides wildcard DNS for any IP address.
 It is heavily inspired by [local-ip.co](http://local-ip.co), [sslip.io](https://sslip.io), and [xip.io](https://xip.io)
 
 ## Usage
@@ -22,16 +22,13 @@ dig @localhost 127.0.0.1.my.local-ip.sh +short
 
 local-ip.sh packs up:
  - an authoritative DNS server that answers queries for the zone `local-ip.sh`
- - a Let's Encrypt client that takes care of obtaining and renewing the wildcard certificate for `*.local-ip.sh` using the DNS-01 challenge
- - an HTTP server that serves the certificate files
+ - a Let's Encrypt client that takes care of obtaining and renewing the wildcard certificate for `*.local-ip.sh` and the root certificate for `local-ip.sh` using the [DNS-01 challenge](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge)
+ - an HTTP server that serves static files, including the certificate files
 
-It answers queries with the IPv4 address it may find in the subdomain by pattern matching the FQDN.  
+It answers queries with the IPv4 address it may find in the subdomain by pattern matching the FQDN.
 It registers an account to Let's Encrypt's ACME server to obtain the wildcard certificate on the first run and then renew
-it about a month before it expires. The account file and the associated key used to request a certificate under the `.lego`
-directory but the certificate's files are stored in `/certs` at the root of the filesystem. I've done it this way to mount
-a persistent storage volume there and keep the files between deployments without tracking them in git but feel free to
-change this behavior in [`certs/certs.go`](./certs/certs.go) and in [`http/server.go`](./http/server.go)
-if you're planning to self-host it.
+it about a month before it expires. The account file and the associated key used to request a certificate under the `./.lego/accounts`
+directory and the certificate's files are stored in `./.lego/certs`.
 
 The certificate files are served by an HTTP server on the arbitrary port `:9229` that is intentionally not exposed to
 the internet. [The website](https://local-ip.sh) is connected to the same private network as the service and serves

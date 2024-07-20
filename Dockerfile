@@ -8,15 +8,20 @@ RUN CGO_ENABLED=0 go build -o /app/local-ip
 
 FROM gcr.io/distroless/base-debian12:latest
 
-ENV PORT 53
+WORKDIR /local-ip
 
-WORKDIR /app
+COPY --from=build /app/local-ip /local-ip/local-ip
+COPY --from=build /app/http/static /local-ip/http/static
 
-COPY --from=build /app/local-ip /app/local-ip
-COPY --from=build /app/http/static /app/http/static
-COPY ./.lego /app/.lego
+VOLUME /local-ip/.lego
 
-EXPOSE $PORT
+# DNS
+EXPOSE 53/udp
+# HTTP
+EXPOSE 80/tcp
+# HTTPS
+EXPOSE 443/tcp
+
 USER root
 
-CMD ["/app/local-ip"]
+CMD ["/local-ip/local-ip"]

@@ -92,19 +92,19 @@ func (c *certsClient) renewCertificates() {
 }
 
 func persistFiles(certificates *certificate.Resource, certType string) {
-	err := os.MkdirAll(fmt.Sprintf("/certs/%s", certType), 0o755)
+	err := os.MkdirAll(fmt.Sprintf("./.lego/certs/%s", certType), 0o755)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Msgf("Failed to mkdir /certs/%s", certType)
+		utils.Logger.Fatal().Err(err).Msgf("Failed to mkdir ./.lego/certs/%s", certType)
 	}
 
-	err = os.WriteFile(fmt.Sprintf("/certs/%s/server.pem", certType), certificates.Certificate, 0o644)
+	err = os.WriteFile(fmt.Sprintf("./.lego/certs/%s/server.pem", certType), certificates.Certificate, 0o644)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Msgf("Failed to save /certs/%s/server.pem", certType)
+		utils.Logger.Fatal().Err(err).Msgf("Failed to save ./.lego/certs/%s/server.pem", certType)
 	}
 
-	os.WriteFile(fmt.Sprintf("/certs/%s/server.key", certType), certificates.PrivateKey, 0o644)
+	os.WriteFile(fmt.Sprintf("./.lego/certs/%s/server.key", certType), certificates.PrivateKey, 0o644)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Msgf("Failed to save /certs/%s/server.key", certType)
+		utils.Logger.Fatal().Err(err).Msgf("Failed to save ./.lego/certs/%s/server.key", certType)
 	}
 
 	jsonBytes, err := json.MarshalIndent(certificates, "", "\t")
@@ -112,9 +112,9 @@ func persistFiles(certificates *certificate.Resource, certType string) {
 		utils.Logger.Fatal().Err(err).Msg("Failed to marshal certificates to JSON")
 	}
 
-	err = os.WriteFile(fmt.Sprintf("/certs/%s/output.json", certType), jsonBytes, 0o644)
+	err = os.WriteFile(fmt.Sprintf("./.lego/certs/%s/output.json", certType), jsonBytes, 0o644)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Msgf("Failed to save /certs/%s/output.json", certType)
+		utils.Logger.Fatal().Err(err).Msgf("Failed to save ./.lego/certs/%s/output.json", certType)
 	}
 }
 
@@ -140,7 +140,7 @@ func NewCertsClient(xip *xip.Xip, user *Account) *certsClient {
 }
 
 func getLastCertificate(legoClient *lego.Client, certType string) *certificate.Resource {
-	jsonBytes, err := os.ReadFile(fmt.Sprintf("/certs/%s/output.json", certType))
+	jsonBytes, err := os.ReadFile(fmt.Sprintf("./.lego/certs/%s/output.json", certType))
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			return nil
