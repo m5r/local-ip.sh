@@ -1,1 +1,5 @@
 /.lego
+ddd
+loadtest
+*.log
+local-ip.sh

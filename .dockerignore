@@ -1,5 +1,4 @@
 ddd
-old
 loadtest
-.lego.new
-.lego.bak
+*.log
+local-ip.sh
