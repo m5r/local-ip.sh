@@ -1,8 +1,3 @@
-# fly.toml app configuration file generated for local-ip-ancient-glade-4376 on 2023-11-29T11:43:10+01:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
 app = "local-ip"
 primary_region = "ams"
 kill_signal = "SIGINT"
@@ -14,7 +9,9 @@ auto_rollback = true
 [build]
 
 [env]
-PORT = "53"
+XIP_DOMAIN = "local-ip.sh"
+XIP_EMAIL = "admin@local-ip.sh"
+XIP_NAMESERVERS = "137.66.40.11,137.66.40.12" # fly.io edge-only ip addresses, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
 
 [mounts]
 source = "lego"

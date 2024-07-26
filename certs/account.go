@@ -36,7 +36,8 @@ func (u *Account) GetPrivateKey() crypto.PrivateKey {
 }
 
 func LoadAccount() *Account {
-	jsonBytes, err := os.ReadFile(accountFilePath)
+	config := utils.GetConfig()
+	jsonBytes, err := os.ReadFile(config.AccountFilePath)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			RegisterAccount()
@@ -51,7 +52,7 @@ func LoadAccount() *Account {
 		utils.Logger.Fatal().Err(err).Msg("Failed to unmarshal account JSON file")
 	}
 
-	privKey, err := os.ReadFile(keyFilePath)
+	privKey, err := os.ReadFile(config.KeyFilePath)
 	if err != nil {
 		utils.Logger.Fatal().Err(err).Msg("Failed to read account's private key file")
 	}
@@ -61,41 +62,42 @@ func LoadAccount() *Account {
 }
 
 func RegisterAccount() {
+	config := utils.GetConfig()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		utils.Logger.Fatal().Err(err).Msg("Failed to generate account key")
 	}
 
 	account := &Account{
-		Email: email,
+		Email: config.Email,
 		key:   privateKey,
 	}
-	config := lego.NewConfig(account)
-	config.CADirURL = caDirUrl
-	legoClient, err := lego.NewClient(config)
+	legoConfig := lego.NewConfig(account)
+	legoConfig.CADirURL = config.CADirURL
+	legoClient, err := lego.NewClient(legoConfig)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Str("CA Directory URL", config.CADirURL).Msg("Failed to initialize lego client")
+		utils.Logger.Fatal().Err(err).Str("CA Directory URL", legoConfig.CADirURL).Msg("Failed to initialize lego client")
 	}
 
 	reg, err := legoClient.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Str("CA Directory URL", config.CADirURL).Msg("Failed to register account to ACME server")
+		utils.Logger.Fatal().Err(err).Str("CA Directory URL", legoConfig.CADirURL).Msg("Failed to register account to ACME server")
 	}
 	if reg.Body.Status != "valid" {
-		utils.Logger.Fatal().Err(err).Str("CA Directory URL", config.CADirURL).Msgf("Registration failed with status %s", reg.Body.Status)
+		utils.Logger.Fatal().Err(err).Str("CA Directory URL", legoConfig.CADirURL).Msgf("Registration failed with status %s", reg.Body.Status)
 	}
 
 	utils.Logger.Debug().
-		Str("CA Directory URL", config.CADirURL).
+		Str("CA Directory URL", legoConfig.CADirURL).
 		Bool("TermsOfServiceAgreed", reg.Body.TermsOfServiceAgreed).
 		Msg("Successfully registered account to ACME server")
 	account.Registration = reg
 
-	os.MkdirAll(filepath.Dir(keyFilePath), os.ModePerm)
+	os.MkdirAll(filepath.Dir(config.KeyFilePath), os.ModePerm)
 	privKey := encode(privateKey)
-	err = os.WriteFile(keyFilePath, []byte(privKey), 0o644)
+	err = os.WriteFile(config.KeyFilePath, []byte(privKey), 0o644)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Str("path", keyFilePath).Msg("Failed to write account's private key file")
+		utils.Logger.Fatal().Err(err).Str("path", config.KeyFilePath).Msg("Failed to write account's private key file")
 	}
 
 	jsonBytes, err := json.MarshalIndent(account, "", "\t")
@@ -103,10 +105,10 @@ func RegisterAccount() {
 		utils.Logger.Fatal().Err(err).Msg("Failed to marshal account JSON file")
 	}
 
-	os.MkdirAll(filepath.Dir(accountFilePath), os.ModePerm)
-	err = os.WriteFile(accountFilePath, jsonBytes, 0o600)
+	os.MkdirAll(filepath.Dir(config.AccountFilePath), os.ModePerm)
+	err = os.WriteFile(config.AccountFilePath, jsonBytes, 0o600)
 	if err != nil {
-		utils.Logger.Fatal().Err(err).Str("path", accountFilePath).Msg("Failed to write account's JSON file")
+		utils.Logger.Fatal().Err(err).Str("path", config.AccountFilePath).Msg("Failed to write account's JSON file")
 	}
 }
 

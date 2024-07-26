@@ -27,14 +27,15 @@ func (c *certsClient) RequestCertificates() {
 }
 
 func (c *certsClient) requestCertificate(certType string) {
+	config := utils.GetConfig()
 	var lastCertificate *certificate.Resource
 	var domains []string
 	if certType == "wildcard" {
 		lastCertificate = c.lastWildcardCertificate
-		domains = []string{"*.local-ip.sh"}
+		domains = []string{fmt.Sprintf("*.%s", config.Domain)}
 	} else if certType == "root" {
 		lastCertificate = c.lastRootCertificate
-		domains = []string{"local-ip.sh"}
+		domains = []string{config.Domain}
 	} else {
 		utils.Logger.Fatal().Msgf("Unexpected certType %s. Only \"wildcard\" and \"root\" are supported", certType)
 	}
@@ -119,9 +120,10 @@ func persistFiles(certificates *certificate.Resource, certType string) {
 }
 
 func NewCertsClient(xip *xip.Xip, user *Account) *certsClient {
-	config := lego.NewConfig(user)
-	config.CADirURL = caDirUrl
-	legoClient, err := lego.NewClient(config)
+	config := utils.GetConfig()
+	legoConfig := lego.NewConfig(user)
+	legoConfig.CADirURL = config.CADirURL
+	legoClient, err := lego.NewClient(legoConfig)
 	if err != nil {
 		utils.Logger.Fatal().Err(err).Msg("Failed to initialize lego client")
 	}

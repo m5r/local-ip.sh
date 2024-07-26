@@ -2,8 +2,11 @@ package http
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,8 +48,9 @@ func registerHandlers() {
 }
 
 func serveHttp() *http.Server {
-	utils.Logger.Info().Msg("Starting up HTTP server on :80")
-	httpServer := &http.Server{Addr: ":http"}
+	config := utils.GetConfig()
+	httpServer := &http.Server{Addr: fmt.Sprintf(":%d", config.HttpPort)}
+	utils.Logger.Info().Str("http_address", httpServer.Addr).Msg("Starting up HTTP server")
 	go func() {
 		err := httpServer.ListenAndServe()
 		if err != http.ErrServerClosed {
@@ -84,22 +88,40 @@ func killServer(httpServer *http.Server) {
 }
 
 func redirectHttpToHttps() {
-	utils.Logger.Info().Msg("Redirecting HTTP traffic from :80 to HTTPS :443")
+	config := utils.GetConfig()
 	httpServer := &http.Server{
-		Addr: ":http",
+		Addr: fmt.Sprintf(":%d", config.HttpPort),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			url := r.URL
+			host := r.Host
+
+			// Strip the port from the host if present
+			if strings.Contains(host, ":") {
+				hostWithoutPort, _, err := net.SplitHostPort(host)
+				if err != nil {
+					utils.Logger.Error().Err(err).Msg("Failed to split host and port")
+				} else {
+					host = hostWithoutPort
+				}
+			}
+			// Add the HTTPS port only if it's not 443
+			if config.HttpsPort != 443 {
+				host = net.JoinHostPort(host, strconv.FormatUint(uint64(config.HttpsPort), 10))
+			}
+
 			url.Host = r.Host
 			url.Scheme = "https"
 			http.Redirect(w, r, url.String(), http.StatusMovedPermanently)
 		}),
 	}
+	utils.Logger.Info().Str("http_address", httpServer.Addr).Msg("Redirecting HTTP traffic to HTTPS")
 	go httpServer.ListenAndServe()
 }
 
 func serveHttps() {
-	utils.Logger.Info().Msg("Starting up HTTPS server on :443")
-	httpsServer := &http.Server{Addr: ":https"}
+	config := utils.GetConfig()
+	httpsServer := &http.Server{Addr: fmt.Sprintf(":%d", config.HttpsPort)}
+	utils.Logger.Info().Str("https_address", httpsServer.Addr).Msg("Starting up HTTPS server")
 	go httpsServer.ListenAndServeTLS("./.lego/certs/root/server.pem", "./.lego/certs/root/server.key")
 }
 

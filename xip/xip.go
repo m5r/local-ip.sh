@@ -14,120 +14,50 @@ import (
 
 type Xip struct {
 	server      dns.Server
-	nameServers []*dns.NS
+	nameServers []string
 }
-
-type HardcodedRecord struct {
-	A     []net.IP // => dns.A
-	AAAA  []net.IP // => dns.AAAA
-	TXT   []string // => dns.TXT
-	MX    []*dns.MX
-	CNAME []string // => dns.CNAME
-	SRV   *dns.SRV
-}
-
-const (
-	zone        = "local-ip.sh."
-	nameservers = "ns1.local-ip.sh.,ns2.local-ip.sh."
-)
 
 var (
-	flyRegion        = os.Getenv("FLY_REGION")
-	dottedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
-	dashedIpV4Regex  = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
-	hardcodedRecords = map[string]HardcodedRecord{
-		"ns.local-ip.sh.": {
-			// record holding ip addresses of ns1 and ns2
-			A: []net.IP{
-				net.IPv4(137, 66, 40, 11),
-				net.IPv4(137, 66, 40, 12),
-			},
-		},
-		"ns1.local-ip.sh.": {
-			A: []net.IP{
-				net.IPv4(137, 66, 40, 11), // fly.io edge-only ip address, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
-			},
-		},
-		"ns2.local-ip.sh.": {
-			A: []net.IP{
-				net.IPv4(137, 66, 40, 12), // fly.io edge-only ip address #2
-			},
-		},
-		"local-ip.sh.": {
-			A: []net.IP{
-				net.IPv4(137, 66, 40, 11), // fly.io edge-only ip address
-			},
-			TXT: []string{"v=spf1 include:capsulecorp.dev ~all"},
-			MX: []*dns.MX{
-				{Preference: 10, Mx: "email.capsulecorp.dev."},
-			},
-		},
-		"autodiscover.local-ip.sh.": {
-			CNAME: []string{
-				"email.capsulecorp.dev.",
-			},
-		},
-		"_autodiscover._tcp.local-ip.sh.": {
-			SRV: &dns.SRV{
-				Priority: 0,
-				Weight:   0,
-				Port:     443,
-				Target:   "email.capsulecorp.dev.",
-			},
-		},
-		"autoconfig.local-ip.sh.": {
-			CNAME: []string{
-				"email.capsulecorp.dev.",
-			},
-		},
-		"_dmarc.local-ip.sh.": {
-			TXT: []string{"v=DMARC1; p=none; rua=mailto:postmaster@local-ip.sh; ruf=mailto:admin@local-ip.sh"},
-		},
-		"dkim._domainkey.local-ip.sh.": {
-			TXT: []string{
-				"v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMW6NFo34qzKRPbzK41GwbWncB8IDg1i2eA2VWznIVDmTzzsqILaBOGv2xokVpzZm0QRF9wSbeVUmvwEeQ7Z6wkfMjawenDEc3XxsNSvQUVBP6LU/xcm1zsR8wtD8r5J+Jm45pNFaateiM/kb/Eypp2ntdtd8CPsEgCEDpNb62LWdy0yzRdZ/M/fNn51UMN8hVFp4YfZngAt3bQwa6kPtgvTeqEbpNf5xanpDysNJt2S8zfqJMVGvnr8JaJiTv7ZlKMMp94aC5Ndcir1WbMyfmgSnGgemuCTVMWDGPJnXDi+8BQMH1b1hmTpWDiVdVlehyyWx5AfPrsWG9cEuDIfXwIDAQAB",
-			},
-		},
-		"_acme-challenge.local-ip.sh.": {
-			// will be filled in later when requesting the wildcard certificate
-			TXT: []string{},
-		},
-	}
+	flyRegion       = os.Getenv("FLY_REGION")
+	dottedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
+	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 )
 
 func (xip *Xip) SetTXTRecord(fqdn string, value string) {
 	utils.Logger.Debug().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
-	if fqdn != "_acme-challenge.local-ip.sh." {
+	config := utils.GetConfig()
+	if fqdn != fmt.Sprintf("_acme-challenge.%s.", config.Domain) {
 		utils.Logger.Debug().Msg("Not allowed, abort")
 		return
 	}
 
-	if records, ok := hardcodedRecords[fqdn]; ok {
-		records.TXT = []string{value}
-		hardcodedRecords["_acme-challenge.local-ip.sh."] = records
+	if rootRecords, ok := hardcodedRecords[fqdn]; ok {
+		rootRecords.TXT = []string{value}
+		hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", config.Domain)] = rootRecords
 	}
 }
 
 func (xip *Xip) UnsetTXTRecord(fqdn string) {
 	utils.Logger.Debug().Str("fqdn", fqdn).Msg("Trying to set TXT record")
-	if fqdn != "_acme-challenge.local-ip.sh." {
+	config := utils.GetConfig()
+	if fqdn != fmt.Sprintf("_acme-challenge.%s.", config.Domain) {
 		utils.Logger.Debug().Msg("Not allowed, abort")
 		return
 	}
 
-	if records, ok := hardcodedRecords[fqdn]; ok {
-		records.TXT = []string{}
-		hardcodedRecords["_acme-challenge.local-ip.sh."] = records
+	if rootRecords, ok := hardcodedRecords[fqdn]; ok {
+		rootRecords.TXT = []string{}
+		hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", config.Domain)] = rootRecords
 	}
 }
 
 func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 	normalizedFqdn := strings.ToLower(fqdn)
 	if hardcodedRecords[normalizedFqdn].A != nil {
-		var records []*dns.A
+		var aRecords []*dns.A
 
 		for _, record := range hardcodedRecords[normalizedFqdn].A {
-			records = append(records, &dns.A{
+			aRecords = append(aRecords, &dns.A{
 				Hdr: dns.RR_Header{
 					Ttl:    uint32((time.Minute * 5).Seconds()),
 					Name:   fqdn,
@@ -138,7 +68,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 			})
 		}
 
-		return records
+		return aRecords
 	}
 
 	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
@@ -171,15 +101,15 @@ func (xip *Xip) answerWithAuthority(question dns.Question, message *dns.Msg) {
 
 func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
 	fqdn := question.Name
-	records := xip.fqdnToA(fqdn)
+	aRecords := xip.fqdnToA(fqdn)
 
-	if len(records) == 0 {
+	if len(aRecords) == 0 {
 		message.Rcode = dns.RcodeNameError
 		xip.answerWithAuthority(question, message)
 		return
 	}
 
-	for _, record := range records {
+	for _, record := range aRecords {
 		message.Answer = append(message.Answer, record)
 	}
 }
@@ -217,10 +147,10 @@ func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
 				Rrtype: dns.TypeNS,
 				Class:  dns.ClassINET,
 			},
-			Ns: ns.Ns,
+			Ns: ns,
 		})
 
-		additionals = append(additionals, xip.fqdnToA(ns.Ns)...)
+		additionals = append(additionals, xip.fqdnToA(ns)...)
 	}
 
 	for _, record := range nameServers {
@@ -329,7 +259,15 @@ func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
 	message.Answer = append(message.Answer, xip.soaRecord(question))
 }
 
+func emailToRname(email string) string {
+	parts := strings.SplitN(email, "@", 2)
+	localPart := strings.ReplaceAll(parts[0], ".", "\\.")
+	domain := parts[1]
+	return localPart + "." + domain + "."
+}
+
 func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
+	config := utils.GetConfig()
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
 		Name:     question.Name,
@@ -338,9 +276,9 @@ func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 		Ttl:      uint32((time.Minute * 5).Seconds()),
 		Rdlength: 0,
 	}
-	soa.Ns = "ns1.local-ip.sh."
-	soa.Mbox = "admin.local-ip.sh."
-	soa.Serial = 2022102800
+	soa.Ns = xip.nameServers[0]
+	soa.Mbox = emailToRname(config.Email)
+	soa.Serial = 2024072600
 	soa.Refresh = uint32((time.Minute * 15).Seconds())
 	soa.Retry = uint32((time.Minute * 15).Seconds())
 	soa.Expire = uint32((time.Minute * 30).Seconds())
@@ -393,6 +331,7 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 
 		error := response.WriteMsg(message)
 		if error != nil {
+			utils.Logger.Debug().Msg(message.String())
 			utils.Logger.Error().Err(error).Str("message", message.String()).Msg("Error responding to query")
 		}
 	}()
@@ -407,6 +346,7 @@ func (xip *Xip) StartServer() {
 	err := xip.server.ListenAndServe()
 	defer xip.server.Shutdown()
 	if err != nil {
+		utils.Logger.Fatal().Err(err).Msg("Failed to start DNS server")
 		if strings.Contains(err.Error(), "fly-global-services: no such host") {
 			// we're not running on fly, bind to 0.0.0.0 instead
 			port := strings.Split(xip.server.Addr, ":")[1]
@@ -421,21 +361,43 @@ func (xip *Xip) StartServer() {
 
 		utils.Logger.Fatal().Err(err).Msg("Failed to start DNS server")
 	}
-	utils.Logger.Info().Str("dns_address", xip.server.Addr).Msg("DNS server listening")
+	utils.Logger.Info().Str("dns_address", xip.server.Addr).Msg("Starting up DNS server")
 }
 
-func NewXip(port int) (xip *Xip) {
-	xip = &Xip{}
+func (xip *Xip) initHardcodedRecords() {
+	config := utils.GetConfig()
+	rootDomainARecords := []net.IP{}
 
-	for _, ns := range strings.Split(nameservers, ",") {
-		xip.nameServers = append(xip.nameServers, &dns.NS{Ns: ns})
+	for i, ns := range config.NameServers {
+		name := fmt.Sprintf("ns%d.%s.", i+1, config.Domain)
+		ip := net.ParseIP(ns)
+
+		rootDomainARecords = append(rootDomainARecords, ip)
+		entry := hardcodedRecords[name]
+		entry.A = append(hardcodedRecords[name].A, ip)
+		hardcodedRecords[name] = entry
+
+		xip.nameServers = append(xip.nameServers, name)
 	}
 
+	hardcodedRecords[fmt.Sprintf("%s.", config.Domain)] = hardcodedRecord{A: rootDomainARecords}
+
+	// will be filled in later when requesting certificates
+	hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", config.Domain)] = hardcodedRecord{TXT: []string{}}
+}
+
+func NewXip() (xip *Xip) {
+	config := utils.GetConfig()
+	xip = &Xip{}
+
+	xip.initHardcodedRecords()
+
 	xip.server = dns.Server{
-		Addr: fmt.Sprintf(":%d", port),
+		Addr: fmt.Sprintf(":%d", config.DnsPort),
 		Net:  "udp",
 	}
 
+	zone := fmt.Sprintf("%s.", config.Domain)
 	dns.HandleFunc(zone, xip.handleDnsRequest)
 
 	return xip

@@ -1,14 +1,19 @@
 services:
-  local-ip.sh:
-    image: local-ip.sh
-    build: .
-    volumes:
-      - lego:/local-ip/.lego
-    restart: unless-stopped
-    ports:
-      - 53:53/udp
-      - 80:80/tcp
-      - 443:443/tcp
+    local-ip.sh:
+        image: local-ip.sh
+        build: .
+        volumes:
+            - lego:/local-ip/.lego
+        restart: unless-stopped
+        environment:
+            XIP_DOMAIN: "local-ip.sh"
+            XIP_EMAIL: "admin@local-ip.sh"
+            XIP_NAMESERVERS: "137.66.40.11,137.66.40.12"
+            # XIP_STAGING: true
+        ports:
+            - 53:53/udp
+            - 80:80/tcp
+            - 443:443/tcp
 
 volumes:
-  lego:
+    lego:

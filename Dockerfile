@@ -4,24 +4,20 @@ WORKDIR /app
 COPY . .
 
 RUN go mod download
-RUN go build -o /app/local-ip
+RUN go build
 
 FROM gcr.io/distroless/base-debian12:latest
 
 WORKDIR /local-ip
 
-COPY --from=build /app/local-ip /local-ip/local-ip
+COPY --from=build /app/local-ip.sh /local-ip/local-ip.sh
 COPY --from=build /app/http/static /local-ip/http/static
 
 VOLUME /local-ip/.lego
 
-# DNS
-EXPOSE 53/udp
-# HTTP
-EXPOSE 80/tcp
-# HTTPS
-EXPOSE 443/tcp
+#      DNS    HTTP   HTTPS
+EXPOSE 53/udp 80/tcp 443/tcp
 
 USER root
 
-CMD ["/local-ip/local-ip"]
+CMD ["/local-ip/local-ip.sh"]
