@@ -20,7 +20,11 @@ func loggingMiddleware(w http.ResponseWriter, r *http.Request, next http.Handler
 	start := time.Now()
 	next(w, r)
 	response := w.(negroni.ResponseWriter)
-	utils.Logger.Debug().Str("FLY_REGION", flyRegion).Msgf("%s %s %d %s", r.Method, r.URL.Path, response.Status(), time.Since(start))
+	logEvent := utils.Logger.Debug()
+	if flyRegion != "" {
+		logEvent.Str("FLY_REGION", flyRegion)
+	}
+	logEvent.Msgf("%s %s %d %s", r.Method, r.URL.Path, response.Status(), time.Since(start))
 }
 
 func newHttpMux() http.Handler {

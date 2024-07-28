@@ -18,9 +18,10 @@ type Xip struct {
 }
 
 var (
-	flyRegion       = os.Getenv("FLY_REGION")
-	dottedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
-	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
+	flyRegion          = os.Getenv("FLY_REGION")
+	dottedIpV4Regex    = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
+	dashedIpV4Regex    = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
+	anyWhitespaceRegex = regexp.MustCompile(`\s`)
 )
 
 func (xip *Xip) SetTXTRecord(fqdn string, value string) {
@@ -333,10 +334,15 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 			message.MsgHdr.Rcode = dns.RcodeRefused
 		}
 
-		logEvent := utils.Logger.Debug().Str("FLY_REGION", flyRegion).Str("question", request.Question[0].String())
-		re := regexp.MustCompile(`\s`)
+		question := anyWhitespaceRegex.ReplaceAllString(request.Question[0].String(), " ")
+		logEvent := utils.Logger.Debug().Str("question", question)
+		if flyRegion != "" {
+			logEvent.Str("FLY_REGION", flyRegion)
+		}
 		for i, answer := range message.Answer {
-			logEvent.Str(fmt.Sprintf("answers[%d]", i), re.ReplaceAllString(answer.String(), " "))
+			key := fmt.Sprintf("answers[%d]", i)
+			value := anyWhitespaceRegex.ReplaceAllString(answer.String(), " ")
+			logEvent.Str(key, value)
 		}
 		logEvent.Msg("resolved")
 
