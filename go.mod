@@ -9,6 +9,7 @@ require (
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
+	github.com/urfave/negroni v1.0.0
 	golang.org/x/net v0.27.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )

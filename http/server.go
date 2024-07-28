@@ -10,10 +10,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urfave/negroni"
 	"local-ip.sh/utils"
 )
 
-func newHttpMux() *http.ServeMux {
+var flyRegion = os.Getenv("FLY_REGION")
+
+func loggingMiddleware(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	start := time.Now()
+	next(w, r)
+	response := w.(negroni.ResponseWriter)
+	utils.Logger.Debug().Str("FLY_REGION", flyRegion).Msgf("%s %s %d %s", r.Method, r.URL.Path, response.Status(), time.Since(start))
+}
+
+func newHttpMux() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /server.key", func(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +58,9 @@ func newHttpMux() *http.ServeMux {
 		http.ServeFile(w, r, "./http/static/index.html")
 	})
 
-	return mux
+	n := negroni.New(negroni.HandlerFunc(loggingMiddleware))
+	n.UseHandler(mux)
+	return n
 }
 
 func serveHttp() *http.Server {
@@ -116,7 +128,7 @@ func redirectHttpToHttps() {
 				host = net.JoinHostPort(host, strconv.FormatUint(uint64(config.HttpsPort), 10))
 			}
 
-			url.Host = r.Host
+			url.Host = host
 			url.Scheme = "https"
 			http.Redirect(w, r, url.String(), http.StatusMovedPermanently)
 		}),
@@ -133,7 +145,12 @@ func serveHttps() {
 		Handler: mux,
 	}
 	utils.Logger.Info().Str("https_address", httpsServer.Addr).Msg("Starting up HTTPS server")
-	go httpsServer.ListenAndServeTLS("./.lego/certs/root/server.pem", "./.lego/certs/root/server.key")
+	go func() {
+		err := httpsServer.ListenAndServeTLS("./.lego/certs/root/server.pem", "./.lego/certs/root/server.key")
+		if err != http.ErrServerClosed {
+			utils.Logger.Fatal().Err(err).Msg("Unexpected error received from HTTPS server")
+		}
+	}()
 }
 
 func ServeHttp() {
