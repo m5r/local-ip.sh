@@ -13,30 +13,32 @@ import (
 	"local-ip.sh/utils"
 )
 
-func registerHandlers() {
-	http.HandleFunc("GET /server.key", func(w http.ResponseWriter, r *http.Request) {
+func newHttpMux() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /server.key", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		http.ServeFile(w, r, "./.lego/certs/wildcard/server.key")
 	})
-	http.HandleFunc("GET /server.pem", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /server.pem", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 		http.ServeFile(w, r, "./.lego/certs/wildcard/server.pem")
 	})
-	http.HandleFunc("GET /og.png", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /og.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		http.ServeFile(w, r, "./http/static/og.png")
 	})
-	http.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		http.ServeFile(w, r, "./http/static/favicon.ico")
 	})
-	http.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		http.ServeFile(w, r, "./http/static/styles.css")
 	})
-	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.Error(w, "Not Found", http.StatusNotFound)
 			return
@@ -45,11 +47,16 @@ func registerHandlers() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		http.ServeFile(w, r, "./http/static/index.html")
 	})
+
+	return mux
 }
 
 func serveHttp() *http.Server {
 	config := utils.GetConfig()
-	httpServer := &http.Server{Addr: fmt.Sprintf(":%d", config.HttpPort)}
+	httpServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", config.HttpPort),
+		Handler: newHttpMux(),
+	}
 	utils.Logger.Info().Str("http_address", httpServer.Addr).Msg("Starting up HTTP server")
 	go func() {
 		err := httpServer.ListenAndServe()
@@ -120,14 +127,16 @@ func redirectHttpToHttps() {
 
 func serveHttps() {
 	config := utils.GetConfig()
-	httpsServer := &http.Server{Addr: fmt.Sprintf(":%d", config.HttpsPort)}
+	mux := newHttpMux()
+	httpsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", config.HttpsPort),
+		Handler: mux,
+	}
 	utils.Logger.Info().Str("https_address", httpsServer.Addr).Msg("Starting up HTTPS server")
 	go httpsServer.ListenAndServeTLS("./.lego/certs/root/server.pem", "./.lego/certs/root/server.key")
 }
 
 func ServeHttp() {
-	registerHandlers()
-
 	httpServer := serveHttp()
 
 	ready := make(chan bool, 1)
