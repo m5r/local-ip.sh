@@ -24,10 +24,10 @@ var (
 )
 
 func (xip *Xip) SetTXTRecord(fqdn string, value string) {
-	utils.Logger.Debug().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
+	utils.Logger.Trace().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
 	config := utils.GetConfig()
 	if fqdn != fmt.Sprintf("_acme-challenge.%s.", config.Domain) {
-		utils.Logger.Debug().Msg("Not allowed, abort")
+		utils.Logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort setting TXT record")
 		return
 	}
 
@@ -38,10 +38,10 @@ func (xip *Xip) SetTXTRecord(fqdn string, value string) {
 }
 
 func (xip *Xip) UnsetTXTRecord(fqdn string) {
-	utils.Logger.Debug().Str("fqdn", fqdn).Msg("Trying to set TXT record")
+	utils.Logger.Trace().Str("fqdn", fqdn).Msg("Trying to unset TXT record")
 	config := utils.GetConfig()
 	if fqdn != fmt.Sprintf("_acme-challenge.%s.", config.Domain) {
-		utils.Logger.Debug().Msg("Not allowed, abort")
+		utils.Logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort unsetting TXT record")
 		return
 	}
 
@@ -288,27 +288,33 @@ func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 }
 
 func (xip *Xip) handleQuery(message *dns.Msg) {
-	for _, question := range message.Question {
-		switch question.Qtype {
-		case dns.TypeA:
-			xip.handleA(question, message)
-		case dns.TypeAAAA:
-			xip.handleAAAA(question, message)
-		case dns.TypeNS:
-			xip.handleNS(question, message)
-		case dns.TypeTXT:
-			xip.handleTXT(question, message)
-		case dns.TypeMX:
-			xip.handleMX(question, message)
-		case dns.TypeCNAME:
-			xip.handleCNAME(question, message)
-		case dns.TypeSRV:
-			xip.handleSRV(question, message)
-		case dns.TypeSOA:
-			xip.handleSOA(question, message)
-		default:
-			xip.handleSOA(question, message)
-		}
+	if len(message.Question) != 1 {
+		// see https://serverfault.com/a/742788
+		utils.Logger.Error().Any("questions", message.Question).Msg("Received an incorrect amount of questions")
+		message.MsgHdr.Rcode = dns.RcodeFormatError
+		return
+	}
+
+	question := message.Question[0]
+	switch question.Qtype {
+	case dns.TypeA:
+		xip.handleA(question, message)
+	case dns.TypeAAAA:
+		xip.handleAAAA(question, message)
+	case dns.TypeNS:
+		xip.handleNS(question, message)
+	case dns.TypeTXT:
+		xip.handleTXT(question, message)
+	case dns.TypeMX:
+		xip.handleMX(question, message)
+	case dns.TypeCNAME:
+		xip.handleCNAME(question, message)
+	case dns.TypeSRV:
+		xip.handleSRV(question, message)
+	case dns.TypeSOA:
+		xip.handleSOA(question, message)
+	default:
+		xip.handleSOA(question, message)
 	}
 }
 
@@ -327,7 +333,12 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 			message.MsgHdr.Rcode = dns.RcodeRefused
 		}
 
-		utils.Logger.Debug().Str("FLY_REGION", flyRegion).Any("question", request.Question).Any("answer", message.Answer).Msg("resolved")
+		logEvent := utils.Logger.Debug().Str("FLY_REGION", flyRegion).Str("question", request.Question[0].String())
+		re := regexp.MustCompile(`\s`)
+		for i, answer := range message.Answer {
+			logEvent.Str(fmt.Sprintf("answers[%d]", i), re.ReplaceAllString(answer.String(), " "))
+		}
+		logEvent.Msg("resolved")
 
 		error := response.WriteMsg(message)
 		if error != nil {
