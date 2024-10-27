@@ -42,15 +42,15 @@ func (c *certsClient) requestCertificate(certType string) {
 
 	utils.Logger.Info().Str("certType", certType).Msg("Requesting certificate")
 	if lastCertificate != nil {
-		certificates, err := certcrypto.ParsePEMBundle(c.lastWildcardCertificate.Certificate)
+		certificates, err := certcrypto.ParsePEMBundle(lastCertificate.Certificate)
 		if err != nil {
-			utils.Logger.Fatal().Err(err).Msg("Failed to parse PEM bundle from last certificate")
+			utils.Logger.Fatal().Str("certType", certType).Err(err).Msg("Failed to parse PEM bundle from last certificate")
 		}
 
 		x509Cert := certificates[0]
 		timeLeft := x509Cert.NotAfter.Sub(time.Now().UTC())
 		if timeLeft > time.Hour*24*30 {
-			utils.Logger.Info().Msgf("%d days left before expiration, skip renewal", int(timeLeft.Hours()/24))
+			utils.Logger.Info().Str("certType", certType).Msgf("%d days left before expiration, skip renewal", int(timeLeft.Hours()/24))
 			return
 		}
 
@@ -89,7 +89,6 @@ func (c *certsClient) renewCertificates() {
 	}
 	c.lastRootCertificate = rootCertificate
 	persistFiles(rootCertificate, "root")
-
 }
 
 func persistFiles(certificates *certificate.Resource, certType string) {
