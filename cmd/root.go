@@ -24,6 +24,8 @@ var command = &cobra.Command{
 		viper.SetEnvPrefix("XIP")
 		viper.AutomaticEnv()
 
+		utils.InitLogger(viper.GetString("log-file"))
+
 		email := viper.GetString("Email")
 		_, err := mail.ParseAddress(email)
 		if err != nil {
@@ -84,6 +86,9 @@ var command = &cobra.Command{
 }
 
 func Execute() {
+	command.Flags().String("log-file", utils.DefaultLogFile, "Path to log file")
+	viper.BindPFlag("log-file", command.Flags().Lookup("log-file"))
+
 	command.Flags().Uint("dns-port", 53, "Port for the DNS server")
 	viper.BindPFlag("dns-port", command.Flags().Lookup("dns-port"))
 
