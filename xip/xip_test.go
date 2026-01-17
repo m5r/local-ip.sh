@@ -5,13 +5,14 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-
-	"github.com/spf13/viper"
 )
 
 func TestResolveDashUnit(t *testing.T) {
-	// viper.Set("dns-port", 9053)
-	xip := NewXip()
+	xip := NewXip(
+		WithDomain("local-ip.sh"),
+		WithDnsPort(9053),
+		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
+	)
 
 	A := xip.fqdnToA("192-168-1-29.local-ip.sh")
 	expected := "192.168.1.29"
@@ -41,20 +42,26 @@ func TestResolveDashUnit(t *testing.T) {
 }
 
 func TestConstructor(t *testing.T) {
-	viper.Set("dns-port", 9053)
-	xip := NewXip()
+	xip := NewXip(
+		WithDomain("local-ip.sh"),
+		WithDnsPort(9053),
+		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
+	)
 
-	if xip.nameServers[0] != "ns1.local-ip.sh" {
-		t.Error("")
+	if xip.nameServers[0] != "ns1.local-ip.sh." {
+		t.Errorf("expected ns1.local-ip.sh., got %s", xip.nameServers[0])
 	}
-	if xip.nameServers[1] != "ns2.local-ip.sh" {
-		t.Error("")
+	if xip.nameServers[1] != "ns2.local-ip.sh." {
+		t.Errorf("expected ns2.local-ip.sh., got %s", xip.nameServers[1])
 	}
 }
 
 func TestResolveDashE2E(t *testing.T) {
-	viper.Set("dns-port", 9053)
-	xip := NewXip()
+	xip := NewXip(
+		WithDomain("local-ip.sh"),
+		WithDnsPort(9053),
+		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
+	)
 	go xip.StartServer()
 
 	cmd := exec.Command("dig", "@localhost", "-p", "9053", "192-168-1-29.local-ip.sh", "+short")
@@ -70,25 +77,17 @@ func TestResolveDashE2E(t *testing.T) {
 
 func BenchmarkResolveDashBasic(b *testing.B) {
 	b.Skip()
-	// var semaphore = make(chan int, 40)
-	// var done = make(chan bool, 1)
 
 	for i := 0; i < b.N; i++ {
 		port := 9053 + i
-		viper.Set("dns-port", port)
-		xip := NewXip()
+		xip := NewXip(
+			WithDomain("local-ip.sh"),
+			WithDnsPort(uint(port)),
+			WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
+		)
 		go xip.StartServer()
 
-		// semaphore <- 1
-		// go func() {
 		cmd := exec.Command("dig", "@localhost", "-p", fmt.Sprint(port), "192-168-1-29.local-ip.sh", "+short")
 		cmd.Run()
-
-		// <-semaphore
-		// if i == b.N {
-		// done <- true
-		// }
-		// }()
 	}
-	// <-done
 }

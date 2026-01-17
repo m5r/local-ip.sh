@@ -15,6 +15,44 @@ import (
 type Xip struct {
 	server      dns.Server
 	nameServers []string
+	domain      string
+	email       string
+	dnsPort     uint
+}
+
+type Option func(*Xip)
+
+func WithDomain(domain string) Option {
+	return func(x *Xip) {
+		x.domain = domain
+	}
+}
+
+func WithEmail(email string) Option {
+	return func(x *Xip) {
+		x.email = email
+	}
+}
+
+func WithDnsPort(port uint) Option {
+	return func(x *Xip) {
+		x.dnsPort = port
+	}
+}
+
+func WithNameServers(nameServers []string) Option {
+	return func(x *Xip) {
+		for i, ns := range nameServers {
+			name := fmt.Sprintf("ns%d.%s.", i+1, x.domain)
+			ip := net.ParseIP(ns)
+
+			entry := hardcodedRecords[name]
+			entry.A = append(entry.A, ip)
+			hardcodedRecords[name] = entry
+
+			x.nameServers = append(x.nameServers, name)
+		}
+	}
 }
 
 var (
@@ -26,29 +64,27 @@ var (
 
 func (xip *Xip) SetTXTRecord(fqdn string, value string) {
 	utils.Logger.Trace().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
-	config := utils.GetConfig()
-	if fqdn != fmt.Sprintf("_acme-challenge.%s.", config.Domain) {
+	if fqdn != fmt.Sprintf("_acme-challenge.%s.", xip.domain) {
 		utils.Logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort setting TXT record")
 		return
 	}
 
 	if rootRecords, ok := hardcodedRecords[fqdn]; ok {
 		rootRecords.TXT = []string{value}
-		hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", config.Domain)] = rootRecords
+		hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", xip.domain)] = rootRecords
 	}
 }
 
 func (xip *Xip) UnsetTXTRecord(fqdn string) {
 	utils.Logger.Trace().Str("fqdn", fqdn).Msg("Trying to unset TXT record")
-	config := utils.GetConfig()
-	if fqdn != fmt.Sprintf("_acme-challenge.%s.", config.Domain) {
+	if fqdn != fmt.Sprintf("_acme-challenge.%s.", xip.domain) {
 		utils.Logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort unsetting TXT record")
 		return
 	}
 
 	if rootRecords, ok := hardcodedRecords[fqdn]; ok {
 		rootRecords.TXT = []string{}
-		hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", config.Domain)] = rootRecords
+		hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", xip.domain)] = rootRecords
 	}
 }
 
@@ -268,7 +304,6 @@ func emailToRname(email string) string {
 }
 
 func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
-	config := utils.GetConfig()
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
 		Name:     question.Name,
@@ -278,7 +313,7 @@ func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 		Rdlength: 0,
 	}
 	soa.Ns = xip.nameServers[0]
-	soa.Mbox = emailToRname(config.Email)
+	soa.Mbox = emailToRname(xip.email)
 	soa.Serial = 2024072600
 	soa.Refresh = uint32((time.Minute * 15).Seconds())
 	soa.Retry = uint32((time.Minute * 15).Seconds())
@@ -403,18 +438,28 @@ func (xip *Xip) initHardcodedRecords() {
 	hardcodedRecords[fmt.Sprintf("_acme-challenge.%s.", config.Domain)] = hardcodedRecord{TXT: []string{}}
 }
 
-func NewXip() (xip *Xip) {
+func NewXip(opts ...Option) (xip *Xip) {
 	config := utils.GetConfig()
-	xip = &Xip{}
+	xip = &Xip{
+		domain:  config.Domain,
+		email:   config.Email,
+		dnsPort: config.DnsPort,
+	}
 
-	xip.initHardcodedRecords()
+	for _, opt := range opts {
+		opt(xip)
+	}
+
+	if len(xip.nameServers) == 0 {
+		xip.initHardcodedRecords()
+	}
 
 	xip.server = dns.Server{
-		Addr: fmt.Sprintf(":%d", config.DnsPort),
+		Addr: fmt.Sprintf(":%d", xip.dnsPort),
 		Net:  "udp",
 	}
 
-	zone := fmt.Sprintf("%s.", config.Domain)
+	zone := fmt.Sprintf("%s.", xip.domain)
 	dns.HandleFunc(zone, xip.handleDnsRequest)
 
 	return xip
