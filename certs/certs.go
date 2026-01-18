@@ -102,7 +102,7 @@ func persistFiles(certificates *certificate.Resource, certType string) {
 		utils.Logger.Fatal().Err(err).Msgf("Failed to save ./.lego/certs/%s/server.pem", certType)
 	}
 
-	os.WriteFile(fmt.Sprintf("./.lego/certs/%s/server.key", certType), certificates.PrivateKey, 0o644)
+	err = os.WriteFile(fmt.Sprintf("./.lego/certs/%s/server.key", certType), certificates.PrivateKey, 0o644)
 	if err != nil {
 		utils.Logger.Fatal().Err(err).Msgf("Failed to save ./.lego/certs/%s/server.key", certType)
 	}

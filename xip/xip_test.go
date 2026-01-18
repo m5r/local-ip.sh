@@ -91,3 +91,41 @@ func BenchmarkResolveDashBasic(b *testing.B) {
 		cmd.Run()
 	}
 }
+
+func TestInstanceIsolation(t *testing.T) {
+	xip1 := NewXip(
+		WithDomain("one.test"),
+		WithDnsPort(0),
+		WithNameServers([]string{"1.1.1.1"}),
+	)
+	xip2 := NewXip(
+		WithDomain("two.test"),
+		WithDnsPort(0),
+		WithNameServers([]string{"2.2.2.2"}),
+	)
+
+	if xip1.records == nil || xip2.records == nil {
+		t.Fatal("records not initialized")
+	}
+
+	if len(xip1.nameServers) != 1 || xip1.nameServers[0] != "ns1.one.test." {
+		t.Errorf("xip1 nameservers incorrect: %v", xip1.nameServers)
+	}
+	if len(xip2.nameServers) != 1 || xip2.nameServers[0] != "ns1.two.test." {
+		t.Errorf("xip2 nameservers incorrect: %v", xip2.nameServers)
+	}
+
+	if _, ok := xip1.records["ns1.one.test."]; !ok {
+		t.Error("xip1 missing ns1.one.test. record")
+	}
+	if _, ok := xip2.records["ns1.two.test."]; !ok {
+		t.Error("xip2 missing ns1.two.test. record")
+	}
+
+	if _, ok := xip1.records["ns1.two.test."]; ok {
+		t.Error("xip1 should not have xip2's records")
+	}
+	if _, ok := xip2.records["ns1.one.test."]; ok {
+		t.Error("xip2 should not have xip1's records")
+	}
+}
