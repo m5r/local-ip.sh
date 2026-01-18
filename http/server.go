@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/urfave/negroni"
@@ -145,6 +146,7 @@ func redirectHttpToHttps() {
 type CertificateReloader struct {
 	CertificateFilePath string
 	KeyFilePath         string
+	mu                  sync.RWMutex
 	certificate         *tls.Certificate
 	lastUpdatedAt       time.Time
 }
@@ -155,16 +157,27 @@ func (cr *CertificateReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certif
 		return nil, fmt.Errorf("failed checking key file modification time: %w", err)
 	}
 
-	if cr.certificate == nil || stat.ModTime().After(cr.lastUpdatedAt) {
-		pair, err := tls.LoadX509KeyPair(cr.CertificateFilePath, cr.KeyFilePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed loading tls key pair: %w", err)
-		}
+	cr.mu.RLock()
+	if cr.certificate != nil && !stat.ModTime().After(cr.lastUpdatedAt) {
+		defer cr.mu.RUnlock()
+		return cr.certificate, nil
+	}
+	cr.mu.RUnlock()
 
-		cr.certificate = &pair
-		cr.lastUpdatedAt = stat.ModTime()
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+
+	if cr.certificate != nil && !stat.ModTime().After(cr.lastUpdatedAt) {
+		return cr.certificate, nil
 	}
 
+	pair, err := tls.LoadX509KeyPair(cr.CertificateFilePath, cr.KeyFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed loading tls key pair: %w", err)
+	}
+
+	cr.certificate = &pair
+	cr.lastUpdatedAt = stat.ModTime()
 	return cr.certificate, nil
 }
 
