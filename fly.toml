@@ -52,8 +52,11 @@ port = 443
 # tls_server_name = "local-ip.sh"
 # [services.http_checks.headers]
 
+# One size above the usual shared-cpu-1x / 256 MB: on 2026-11-20 the service needed about 8% of a
+# vCPU against that size's 6.25% allowance and was throttled into slow and lost DNS answers.
+# Go back down once the CPU cost per query has been fixed and verified here.
 [[vm]]
-size = "shared-cpu-1x"
+size = "shared-cpu-2x"
 cpu_kind = "shared"
-cpus = 1
-memory_mb = 256
+cpus = 2
+memory_mb = 512
