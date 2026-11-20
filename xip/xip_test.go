@@ -1,10 +1,13 @@
 package xip
 
 import (
-	"fmt"
-	"os/exec"
-	"strings"
+	"context"
+	"net"
+	"strconv"
 	"testing"
+	"time"
+
+	"github.com/miekg/dns"
 )
 
 func TestResolveDashUnit(t *testing.T) {
@@ -59,36 +62,46 @@ func TestConstructor(t *testing.T) {
 func TestResolveDashE2E(t *testing.T) {
 	xip := NewXip(
 		WithDomain("local-ip.sh"),
-		WithDnsPort(9053),
+		WithDnsPort(0),
 		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
 	)
+	started := make(chan struct{})
+	xip.server.NotifyStartedFunc = func() { close(started) }
 	go xip.StartServer()
 
-	cmd := exec.Command("dig", "@localhost", "-p", "9053", "192-168-1-29.local-ip.sh", "+short")
-	out, err := cmd.Output()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DNS server did not start within 5 seconds")
+	}
+	t.Cleanup(func() {
+		if err := xip.server.Shutdown(); err != nil {
+			t.Errorf("shutting down DNS server: %v", err)
+		}
+	})
+
+	port := xip.server.PacketConn.LocalAddr().(*net.UDPAddr).Port
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	query := new(dns.Msg)
+	query.SetQuestion("192-168-1-29.local-ip.sh.", dns.TypeA)
+	client := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	resp, _, err := client.ExchangeContext(ctx, query, address)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("querying %s: %v", address, err)
 	}
 
-	if strings.TrimSpace(string(out)) != "192.168.1.29" {
-		t.Fatal(string(out))
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected exactly one answer, received %d:\n%s", len(resp.Answer), resp)
 	}
-}
-
-func BenchmarkResolveDashBasic(b *testing.B) {
-	b.Skip()
-
-	for i := 0; i < b.N; i++ {
-		port := 9053 + i
-		xip := NewXip(
-			WithDomain("local-ip.sh"),
-			WithDnsPort(uint(port)),
-			WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
-		)
-		go xip.StartServer()
-
-		cmd := exec.Command("dig", "@localhost", "-p", fmt.Sprint(port), "192-168-1-29.local-ip.sh", "+short")
-		cmd.Run()
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("expected an A record, received %s", resp.Answer[0])
+	}
+	if a.A.String() != "192.168.1.29" {
+		t.Fatalf("Expected 192.168.1.29 but received %s", a.A)
 	}
 }
 
