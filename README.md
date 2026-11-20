@@ -41,6 +41,11 @@ local-ip.sh can be configured through environment variables or CLI flags
 - `XIP_EMAIL` or `--email` required, administrator's email address, used to create the ACME account to request certificates from Let's Encrypt and as the `RNAME` value of the SOA record representing the domain administrator's email address.
 - `XIP_NAMESERVERS` or `--nameservers` required, comma-separated IPv4 addresses used to answer `A` queries for `nsX.{domain}` where `X` is the index of the address in this list. For example setting `--domain example.com --nameservers 1.2.3.4,9.8.7.6` will answer `1.2.3.4` for `ns1.example.com` and `9.8.7.6` for `ns2.example.com`. All `nsX.{domain}` nameservers will be in the answer for NS queries to the zone.
 - `XIP_ZONE_FILE` or `--zone-file` optional, path to a zone file in RFC 1035 syntax declaring delegations of subdomains to other name servers. Names are relative to the domain and the default TTL is 300 seconds. Only NS records below the apex and A/AAAA glue records for their name servers are accepted. A delegated name server must be inside the delegated subdomain, with glue, or outside the domain entirely. Glue addresses must not be this server's own nameserver addresses. Anything else stops the server at startup with an error naming the file and the record.
+- `XIP_LOG_LEVEL` or `--log-level` optional, `trace`, `debug`, `info`, `warn` or `error`, defaults to `info`.
+- `XIP_LOG_FORMAT` or `--log-format` optional, `auto`, `json` or `console`, defaults to `auto`, which is `console` on a terminal and `json` otherwise.
+- `XIP_LOG_FILE` or `--log-file` optional, also append logs as JSON to this file, rotated at 1 MB inside its directory, which must stay writable. No file is written by default.
+
+At `debug` and `trace` level the server logs each query it answers with the name that was asked for, which exposes the internal host names of the people using the instance and slows the server down; use these levels for troubleshooting only. These settings apply to the server's own log lines: the ACME library writes its own lines to standard error.
 
 ### Delegating a subdomain
 

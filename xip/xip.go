@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 	"local-ip.sh/utils"
 )
 
@@ -25,6 +26,7 @@ type Xip struct {
 	records     map[string]hardcodedRecord
 	zoneFile    string
 	delegations *zoneCuts
+	logger      zerolog.Logger
 }
 
 type Option func(*Xip)
@@ -53,6 +55,12 @@ func WithZoneFile(path string) Option {
 	}
 }
 
+func WithLogger(logger zerolog.Logger) Option {
+	return func(x *Xip) {
+		x.logger = logger
+	}
+}
+
 func WithNameServers(nameServers []string) Option {
 	return func(x *Xip) {
 		x.recordsMu.Lock()
@@ -71,16 +79,15 @@ func WithNameServers(nameServers []string) Option {
 }
 
 var (
-	flyRegion          = os.Getenv("FLY_REGION")
-	dottedIpV4Regex    = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
-	dashedIpV4Regex    = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
-	anyWhitespaceRegex = regexp.MustCompile(`\s`)
+	flyRegion       = os.Getenv("FLY_REGION")
+	dottedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
+	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 )
 
 func (xip *Xip) SetTXTRecord(fqdn string, value string) {
-	utils.Logger.Trace().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
+	xip.logger.Trace().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
 	if fqdn != fmt.Sprintf("_acme-challenge.%s.", xip.domain) {
-		utils.Logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort setting TXT record")
+		xip.logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort setting TXT record")
 		return
 	}
 
@@ -93,9 +100,9 @@ func (xip *Xip) SetTXTRecord(fqdn string, value string) {
 }
 
 func (xip *Xip) UnsetTXTRecord(fqdn string) {
-	utils.Logger.Trace().Str("fqdn", fqdn).Msg("Trying to unset TXT record")
+	xip.logger.Trace().Str("fqdn", fqdn).Msg("Trying to unset TXT record")
 	if fqdn != fmt.Sprintf("_acme-challenge.%s.", xip.domain) {
-		utils.Logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort unsetting TXT record")
+		xip.logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort unsetting TXT record")
 		return
 	}
 
@@ -363,7 +370,7 @@ func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
 func (xip *Xip) handleQuery(message *dns.Msg) {
 	if len(message.Question) != 1 {
 		// see https://serverfault.com/a/742788
-		utils.Logger.Error().Any("questions", message.Question).Msg("Received an incorrect amount of questions")
+		xip.logger.Error().Any("questions", message.Question).Msg("Received an incorrect amount of questions")
 		message.MsgHdr.Rcode = dns.RcodeFormatError
 		return
 	}
@@ -402,38 +409,61 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 }
 
 func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) {
-	go func() {
-		message := new(dns.Msg)
-		message.SetReply(request)
-		message.Compress = true
-		message.Authoritative = true
-		message.RecursionAvailable = false
+	message := new(dns.Msg)
+	message.SetReply(request)
+	message.Compress = true
+	message.Authoritative = true
+	message.RecursionAvailable = false
 
-		switch request.Opcode {
-		case dns.OpcodeQuery:
-			xip.handleQuery(message)
-		default:
-			message.MsgHdr.Rcode = dns.RcodeRefused
-		}
+	switch request.Opcode {
+	case dns.OpcodeQuery:
+		xip.handleQuery(message)
+	default:
+		message.MsgHdr.Rcode = dns.RcodeRefused
+	}
 
-		question := anyWhitespaceRegex.ReplaceAllString(request.Question[0].String(), " ")
-		logEvent := utils.Logger.Debug().Str("question", question)
-		if flyRegion != "" {
-			logEvent.Str("FLY_REGION", flyRegion)
+	if err := response.WriteMsg(message); err != nil {
+		event := xip.logger.Error().Err(err)
+		if len(message.Question) > 0 {
+			question := message.Question[0]
+			event.Str("name", question.Name).Str("type", dns.Type(question.Qtype).String())
 		}
-		for i, answer := range message.Answer {
-			key := fmt.Sprintf("answers[%d]", i)
-			value := anyWhitespaceRegex.ReplaceAllString(answer.String(), " ")
-			logEvent.Str(key, value)
-		}
-		logEvent.Msg("resolved")
+		event.Msg("Error responding to query")
+		return
+	}
 
-		error := response.WriteMsg(message)
-		if error != nil {
-			utils.Logger.Debug().Msg(message.String())
-			utils.Logger.Error().Err(error).Str("message", message.String()).Msg("Error responding to query")
-		}
-	}()
+	xip.logResolved(message)
+}
+
+// logResolved computes nothing unless debug is enabled: at the default level this runs once per
+// query and must cost no more than the level check.
+func (xip *Xip) logResolved(message *dns.Msg) {
+	event := xip.logger.Debug()
+	if !event.Enabled() {
+		return
+	}
+
+	if len(message.Question) > 0 {
+		question := message.Question[0]
+		event.Str("name", question.Name).Str("type", dns.Type(question.Qtype).String())
+	}
+
+	rcode, ok := dns.RcodeToString[message.Rcode]
+	if !ok {
+		rcode = fmt.Sprintf("RCODE%d", message.Rcode)
+	}
+	event.Str("rcode", rcode)
+
+	answers := make([]string, 0, len(message.Answer))
+	for _, answer := range message.Answer {
+		answers = append(answers, strings.Join(strings.Fields(answer.String()), " "))
+	}
+	event.Strs("answers", answers)
+
+	if flyRegion != "" {
+		event.Str("FLY_REGION", flyRegion)
+	}
+	event.Msg("resolved")
 }
 
 func (xip *Xip) StartServer() {
@@ -445,7 +475,7 @@ func (xip *Xip) StartServer() {
 	err := xip.server.ListenAndServe()
 	defer xip.server.Shutdown()
 	if err != nil {
-		utils.Logger.Error().Err(err).Msg("Failed to start DNS server")
+		xip.logger.Error().Err(err).Msg("Failed to start DNS server")
 		if strings.Contains(err.Error(), "fly-global-services: no such host") {
 			// we're not running on fly, bind to 0.0.0.0 instead
 			port := strings.Split(xip.server.Addr, ":")[1]
@@ -458,9 +488,9 @@ func (xip *Xip) StartServer() {
 			return
 		}
 
-		utils.Logger.Fatal().Err(err).Msg("Failed to start DNS server")
+		xip.logger.Fatal().Err(err).Msg("Failed to start DNS server")
 	}
-	utils.Logger.Info().Str("dns_address", xip.server.Addr).Msg("Starting up DNS server")
+	xip.logger.Info().Str("dns_address", xip.server.Addr).Msg("Starting up DNS server")
 }
 
 func (xip *Xip) initNameServers(nameServers []string) {
@@ -514,7 +544,7 @@ func (xip *Xip) loadZoneFile() error {
 	xip.delegations = delegations
 
 	cuts := delegations.sortedCuts()
-	utils.Logger.Info().
+	xip.logger.Info().
 		Str("zone_file", xip.zoneFile).
 		Int("delegations", len(cuts)).
 		Strs("cuts", cuts).
@@ -530,6 +560,7 @@ func NewXip(opts ...Option) (*Xip, error) {
 		dnsPort:  config.DnsPort,
 		records:  initialRecords(),
 		zoneFile: config.ZoneFile,
+		logger:   utils.Logger,
 	}
 
 	for _, opt := range opts {

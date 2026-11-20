@@ -24,10 +24,17 @@ var command = &cobra.Command{
 		viper.SetEnvPrefix("XIP")
 		viper.AutomaticEnv()
 
-		utils.InitLogger(viper.GetString("log-file"))
+		err := utils.InitLogger(utils.LogOptions{
+			Level:  viper.GetString("log-level"),
+			Format: viper.GetString("log-format"),
+			File:   viper.GetString("log-file"),
+		})
+		if err != nil {
+			utils.Logger.Fatal().Err(err).Msg("Invalid logging configuration")
+		}
 
 		email := viper.GetString("Email")
-		_, err := mail.ParseAddress(email)
+		_, err = mail.ParseAddress(email)
 		if err != nil {
 			utils.Logger.Fatal().Err(err).Msg("Invalid email address")
 		}
@@ -89,7 +96,13 @@ var command = &cobra.Command{
 }
 
 func Execute() {
-	command.Flags().String("log-file", utils.DefaultLogFile, "Path to log file")
+	command.Flags().String("log-level", utils.DefaultLogLevel, "Log level: trace, debug, info, warn or error")
+	viper.BindPFlag("log-level", command.Flags().Lookup("log-level"))
+
+	command.Flags().String("log-format", utils.DefaultLogFormat, "Log format: auto, json or console (auto is console on a terminal, json otherwise)")
+	viper.BindPFlag("log-format", command.Flags().Lookup("log-format"))
+
+	command.Flags().String("log-file", "", "Path of an additional rotating log file (optional)")
 	viper.BindPFlag("log-file", command.Flags().Lookup("log-file"))
 
 	command.Flags().Uint("dns-port", 53, "Port for the DNS server")
