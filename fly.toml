@@ -11,11 +11,16 @@ auto_rollback = true
 [env]
 XIP_DOMAIN = "local-ip.sh"
 XIP_EMAIL = "admin@local-ip.sh"
+XIP_ZONE_FILE = "/etc/local-ip.zone"
 XIP_NAMESERVERS = "137.66.40.11,137.66.40.12" # fly.io edge-only ip addresses, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
 
 [mounts]
 source = "lego"
 destination = "/local-ip/.lego"
+
+[[files]]
+guest_path = "/etc/local-ip.zone"
+local_path = "zones/local-ip.sh.zone"
 
 [[services]]
 protocol = "udp"

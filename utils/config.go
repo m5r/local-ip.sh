@@ -10,6 +10,7 @@ type config struct {
 	HttpsPort uint `mapstructure:"https-port"`
 	Domain    string
 	Email     string
+	ZoneFile  string `mapstructure:"zone-file"`
 
 	NameServers     []string
 	CADirURL        string

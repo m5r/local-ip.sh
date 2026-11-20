@@ -1,0 +1,4 @@
+; Zone file of the production instance, origin local-ip.sh.
+; staging.local-ip.sh is served by the staging instance (Fly app local-ip-staging).
+staging      NS  ns1.staging
+ns1.staging  A   149.248.203.129

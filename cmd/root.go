@@ -62,7 +62,10 @@ var command = &cobra.Command{
 		utils.InitConfig()
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		n := xip.NewXip()
+		n, err := xip.NewXip()
+		if err != nil {
+			utils.Logger.Fatal().Err(err).Msg("Failed to set up the DNS server")
+		}
 
 		go func() {
 			// try to obtain certificates once the DNS server is accepting requests
@@ -109,6 +112,9 @@ func Execute() {
 
 	command.Flags().String("nameservers", "", "List of nameservers separated by commas (required)")
 	viper.BindPFlag("nameservers", command.Flags().Lookup("nameservers"))
+
+	command.Flags().String("zone-file", "", "Path to a zone file declaring delegations (optional)")
+	viper.BindPFlag("zone-file", command.Flags().Lookup("zone-file"))
 
 	if err := command.Execute(); err != nil {
 		utils.Logger.Fatal().Err(err).Msg("Failed to run local-ip.sh")

@@ -35,6 +35,15 @@ type target struct {
 	email       string
 	stagingCA   bool
 	roots       *x509.CertPool
+	delegations []targetDelegation
+}
+
+// targetDelegation is a zone cut declared in the target's zone file, as the suite reads it
+// independently of the server.
+type targetDelegation struct {
+	cut         string
+	nameServers []string
+	glue        map[string][]netip.Addr
 }
 
 func (tg *target) zone() string {
@@ -66,8 +75,12 @@ func loadTarget(configPath string) (*target, error) {
 	}
 
 	var raw struct {
-		App any            `toml:"app"`
-		Env map[string]any `toml:"env"`
+		App   any            `toml:"app"`
+		Env   map[string]any `toml:"env"`
+		Files []struct {
+			GuestPath any `toml:"guest_path"`
+			LocalPath any `toml:"local_path"`
+		} `toml:"files"`
 	}
 	if err := toml.Unmarshal(content, &raw); err != nil {
 		return nil, fmt.Errorf("parsing Fly config %s: %w", configPath, err)
@@ -150,7 +163,110 @@ func loadTarget(configPath string) (*target, error) {
 		return nil, fmt.Errorf("loading trust roots for %s: %w", configPath, err)
 	}
 
+	zoneFile, present, err := optionalEnv(raw.Env, "XIP_ZONE_FILE")
+	if err != nil {
+		return nil, invalid("env.XIP_ZONE_FILE", "%w", err)
+	}
+	if present && zoneFile != "" {
+		var localPaths []string
+		for _, file := range raw.Files {
+			guestPath, ok := file.GuestPath.(string)
+			if !ok || strings.Trim(guestPath, asciiWhitespace) != zoneFile {
+				continue
+			}
+			localPath, _ := file.LocalPath.(string)
+			localPaths = append(localPaths, strings.Trim(localPath, asciiWhitespace))
+		}
+		if len(localPaths) != 1 || localPaths[0] == "" {
+			return nil, invalid("env.XIP_ZONE_FILE", "%q must be the guest_path of exactly one [[files]] entry with a non-empty local_path, found %d entries with local paths %q", zoneFile, len(localPaths), localPaths)
+		}
+		localPath := localPaths[0]
+		if !filepath.IsAbs(localPath) {
+			localPath = filepath.Join(filepath.Dir(configPath), localPath)
+		}
+		tg.delegations, err = loadDelegations(localPath, tg.zone())
+		if err != nil {
+			return nil, fmt.Errorf("%s: env.XIP_ZONE_FILE: %w", configPath, err)
+		}
+	}
+
 	return tg, nil
+}
+
+// wireCanonicalName returns the name as it reads after a round trip through wire format,
+// lower-cased: the zone parser keeps escapes as written, while names in responses arrive unpacked,
+// so `\115ub` in the file must be expected as `sub`.
+func wireCanonicalName(name string) (string, error) {
+	buf := make([]byte, 255)
+	if _, err := dns.PackDomainName(dns.Fqdn(name), buf, 0, nil, false); err != nil {
+		return "", fmt.Errorf("packing %q: %w", name, err)
+	}
+	unpacked, _, err := dns.UnpackDomainName(buf, 0)
+	if err != nil {
+		return "", fmt.Errorf("unpacking %q: %w", name, err)
+	}
+	return dns.CanonicalName(unpacked), nil
+}
+
+// loadDelegations reads the cuts, their name servers and the glue for them from a zone file. It
+// does not repeat the server's validation: the suite only needs to know what to expect.
+func loadDelegations(zoneFilePath string, zone string) ([]targetDelegation, error) {
+	file, err := os.Open(zoneFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("opening zone file: %w", err)
+	}
+	defer file.Close()
+
+	zp := dns.NewZoneParser(file, zone, zoneFilePath)
+	zp.SetDefaultTTL(300)
+	byCut := make(map[string]*targetDelegation)
+	addresses := make(map[string][]netip.Addr)
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		owner, err := wireCanonicalName(rr.Header().Name)
+		if err != nil {
+			return nil, fmt.Errorf("zone file %s: owner of %q: %w", zoneFilePath, rr, err)
+		}
+		switch record := rr.(type) {
+		case *dns.NS:
+			target, err := wireCanonicalName(record.Ns)
+			if err != nil {
+				return nil, fmt.Errorf("zone file %s: target of %q: %w", zoneFilePath, rr, err)
+			}
+			d, ok := byCut[owner]
+			if !ok {
+				d = &targetDelegation{cut: owner, glue: make(map[string][]netip.Addr)}
+				byCut[owner] = d
+			}
+			d.nameServers = append(d.nameServers, target)
+		case *dns.A:
+			addr, ok := netip.AddrFromSlice(record.A)
+			if !ok {
+				return nil, fmt.Errorf("zone file %s: record %s A has no valid address", zoneFilePath, owner)
+			}
+			addresses[owner] = append(addresses[owner], addr.Unmap())
+		case *dns.AAAA:
+			addr, ok := netip.AddrFromSlice(record.AAAA)
+			if !ok {
+				return nil, fmt.Errorf("zone file %s: record %s AAAA has no valid address", zoneFilePath, owner)
+			}
+			addresses[owner] = append(addresses[owner], addr)
+		}
+	}
+	if err := zp.Err(); err != nil {
+		return nil, fmt.Errorf("parsing zone file: %w", err)
+	}
+
+	delegations := make([]targetDelegation, 0, len(byCut))
+	for _, cut := range slices.Sorted(maps.Keys(byCut)) {
+		d := byCut[cut]
+		for _, nameServer := range d.nameServers {
+			if dns.IsSubDomain(cut, nameServer) && len(addresses[nameServer]) > 0 {
+				d.glue[nameServer] = addresses[nameServer]
+			}
+		}
+		delegations = append(delegations, *d)
+	}
+	return delegations, nil
 }
 
 func requiredEnv(env map[string]any, key string) (string, error) {
@@ -474,4 +590,225 @@ func colonHex(b []byte) string {
 		pairs = append(pairs, encoded[i:i+2])
 	}
 	return strings.Join(pairs, ":")
+}
+
+func TestLoadTargetDelegations(t *testing.T) {
+	tests := []struct {
+		configPath string
+		want       []targetDelegation
+	}{
+		{
+			configPath: filepath.Join("..", "fly.toml"),
+			want: []targetDelegation{{
+				cut:         "staging.local-ip.sh.",
+				nameServers: []string{"ns1.staging.local-ip.sh."},
+				glue:        map[string][]netip.Addr{"ns1.staging.local-ip.sh.": {netip.MustParseAddr("149.248.203.129")}},
+			}},
+		},
+		{
+			configPath: filepath.Join("..", "fly.staging.toml"),
+			want: []targetDelegation{{
+				cut:         "e2e-delegated.staging.local-ip.sh.",
+				nameServers: []string{"ns1.e2e-delegated.staging.local-ip.sh."},
+				glue:        map[string][]netip.Addr{"ns1.e2e-delegated.staging.local-ip.sh.": {netip.MustParseAddr("192.0.2.53")}},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.configPath, func(t *testing.T) {
+			tg, err := loadTarget(tt.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertDelegations(t, tg.delegations, tt.want)
+		})
+	}
+}
+
+func assertDelegations(t *testing.T, got, want []targetDelegation) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d delegations %+v, want %d %+v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i].cut != want[i].cut {
+			t.Errorf("delegation %d cut = %q, want %q", i, got[i].cut, want[i].cut)
+		}
+		if !slices.Equal(got[i].nameServers, want[i].nameServers) {
+			t.Errorf("delegation %s name servers = %v, want %v", want[i].cut, got[i].nameServers, want[i].nameServers)
+		}
+		if !maps.EqualFunc(got[i].glue, want[i].glue, slices.Equal) {
+			t.Errorf("delegation %s glue = %v, want %v", want[i].cut, got[i].glue, want[i].glue)
+		}
+	}
+}
+
+func writeZoneFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadTargetZoneFile(t *testing.T) {
+	const zoneFile = `"/etc/local-ip.zone"`
+	const validZone = "Sub NS NS1.Sub\nns1.sub A 192.0.2.1\nns1.sub AAAA 2001:db8::1\nsub NS ns.other.test.\n"
+	validWant := []targetDelegation{{
+		cut:         "sub.example.com.",
+		nameServers: []string{"ns1.sub.example.com.", "ns.other.test."},
+		glue:        map[string][]netip.Addr{"ns1.sub.example.com.": {netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}},
+	}}
+
+	tests := []struct {
+		name    string
+		zoneEnv string
+		files   string
+		zone    string
+		want    []targetDelegation
+		wantErr []string
+	}{
+		{
+			name: "no XIP_ZONE_FILE yields no delegations",
+		},
+		{
+			name:    "empty XIP_ZONE_FILE yields no delegations",
+			zoneEnv: `""`,
+		},
+		{
+			name:    "local path relative to the config directory",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/other\"\nlocal_path = \"other.zone\"\n\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
+			zone:    validZone,
+			want:    validWant,
+		},
+		{
+			name:    "names spelled with decimal escapes are expected in their plain form",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
+			zone:    `\115ub NS \110s1.\115ub` + "\n" + `ns1.sub A 192.0.2.1` + "\n" + `ns1.\115ub AAAA 2001:db8::1` + "\n" + `sub NS ns.\111ther.test.` + "\n",
+			want:    validWant,
+		},
+		{
+			name:    "zone file without delegations",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
+			zone:    "; nothing delegated\n",
+		},
+		{
+			name:    "no [[files]] entry",
+			zoneEnv: zoneFile,
+			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "guest_path", "local_path"},
+		},
+		{
+			name:    "no [[files]] entry with the guest path",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/other.zone\"\nlocal_path = \"zones/test.zone\"\n",
+			zone:    validZone,
+			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "guest_path", "local_path"},
+		},
+		{
+			name:    "two [[files]] entries with the guest path",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
+			zone:    validZone,
+			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "found 2"},
+		},
+		{
+			name:    "empty local path",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"  \"\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "local_path"},
+		},
+		{
+			name:    "missing zone file",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/missing.zone\"\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "missing.zone"},
+		},
+		{
+			name:    "unparsable zone file",
+			zoneEnv: zoneFile,
+			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
+			zone:    "sub NS ns1.sub\nns1.sub A not-an-address\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "test.zone", "not-an-address"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv(nil)
+			if tt.zoneEnv != "" {
+				env["XIP_ZONE_FILE"] = tt.zoneEnv
+			}
+			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n"+tt.files)
+			if tt.zone != "" {
+				zonesDir := filepath.Join(filepath.Dir(configPath), "zones")
+				if err := os.Mkdir(zonesDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writeZoneFile(t, zonesDir, "test.zone", tt.zone)
+			}
+
+			tg, err := loadTarget(configPath)
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatal("loadTarget succeeded, want an error")
+				}
+				for _, want := range append([]string{configPath}, tt.wantErr...) {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertDelegations(t, tg.delegations, tt.want)
+		})
+	}
+}
+
+// TestDelegationsMatchTargets keeps the two Fly configs consistent: when one target's zone lies
+// inside the other's, the parent must delegate it to exactly the child's name servers, or the
+// child cannot be found through public DNS and cannot obtain certificates.
+func TestDelegationsMatchTargets(t *testing.T) {
+	var targets []*target
+	for _, configPath := range []string{filepath.Join("..", "fly.toml"), filepath.Join("..", "fly.staging.toml")} {
+		tg, err := loadTarget(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets = append(targets, tg)
+	}
+
+	checked := 0
+	for _, parent := range targets {
+		for _, child := range targets {
+			if parent == child || parent.zone() == child.zone() || !dns.IsSubDomain(parent.zone(), child.zone()) {
+				continue
+			}
+			checked++
+			i := slices.IndexFunc(parent.delegations, func(d targetDelegation) bool { return d.cut == child.zone() })
+			if i < 0 {
+				t.Errorf("%s does not delegate %s to %s", parent.app, child.zone(), child.app)
+				continue
+			}
+			d := parent.delegations[i]
+
+			wantHosts := slices.Sorted(slices.Values(child.nameServerHosts()))
+			if got := slices.Sorted(slices.Values(d.nameServers)); !slices.Equal(got, wantHosts) {
+				t.Errorf("%s delegates %s to %v, want %v (the name servers of %s)", parent.app, d.cut, got, wantHosts, child.app)
+			}
+			for j, host := range child.nameServerHosts() {
+				if got, want := d.glue[host], []netip.Addr{child.nameServers[j]}; !slices.Equal(got, want) {
+					t.Errorf("%s glue for %s = %v, want %v", parent.app, host, got, want)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Error("no target's zone lies inside another's; expected production to be the parent of staging")
+	}
 }

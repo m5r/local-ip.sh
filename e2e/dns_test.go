@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -175,8 +176,16 @@ type dnsCase struct {
 // running its remaining cases would only spend a full retry budget on each of them.
 func runDNSCases(t *testing.T, server netip.Addr, recursion bool, cases []dnsCase) {
 	t.Helper()
+	if notRun, silent := runDNSCasesUntilSilent(t, server, recursion, cases); silent {
+		t.Fatalf("%s stopped answering DNS queries; %d of its %d cases were not run", server, notRun, len(cases))
+	}
+}
+
+// runDNSCasesUntilSilent runs the cases as subtests until one gets no response at all, and reports
+// whether that happened and how many cases were left unrun.
+func runDNSCasesUntilSilent(t *testing.T, server netip.Addr, recursion bool, cases []dnsCase) (notRun int, silent bool) {
+	t.Helper()
 	for i, tc := range cases {
-		silent := false
 		t.Run(tc.name, func(t *testing.T) {
 			resp, err := exchange(t, server, tc.qname, tc.qtype, recursion)
 			if err != nil {
@@ -207,9 +216,10 @@ func runDNSCases(t *testing.T, server netip.Addr, recursion bool, cases []dnsCas
 			}
 		})
 		if silent {
-			t.Fatalf("%s stopped answering DNS queries; %d of its %d cases were not run", server, len(cases)-i-1, len(cases))
+			return len(cases) - i - 1, true
 		}
 	}
+	return 0, false
 }
 
 func expectA(want netip.Addr) func(*testing.T, *dns.Msg) {
@@ -382,6 +392,166 @@ func publicResolverAnswers(t *testing.T, tg *target) {
 				{name: "dashed with random prefix", qname: randomLabel(t) + ".10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(netip.MustParseAddr("10.11.12.13"))},
 				{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, check: expectNS(tg.nameServerHosts(), nil)},
 			})
+		})
+	}
+}
+
+func delegationChecks(t *testing.T, tg *target) {
+	if len(tg.delegations) == 0 {
+		t.Skipf("%s declares no delegations in its zone file", tg.app)
+	}
+	noError := []int{dns.RcodeSuccess}
+
+	for _, server := range tg.nameServers {
+		t.Run(server.String(), func(t *testing.T) {
+			for i, d := range tg.delegations {
+				silent := false
+				t.Run(d.cut, func(t *testing.T) {
+					referral := expectReferral(d)
+					cases := []dnsCase{
+						{name: "cut NS", qname: d.cut, qtype: dns.TypeNS, rcodes: noError, check: referral},
+						{name: "random name A", qname: randomLabel(t) + "." + d.cut, qtype: dns.TypeA, rcodes: noError, check: referral},
+						{name: "dashed A", qname: "10-11-12-13." + d.cut, qtype: dns.TypeA, rcodes: noError, check: referral},
+						{name: "ACME challenge TXT", qname: "_acme-challenge." + d.cut, qtype: dns.TypeTXT, rcodes: noError, check: referral},
+						{name: "cut DS", qname: d.cut, qtype: dns.TypeDS, rcodes: noError, authoritative: true, check: expectNoNSInAuthority},
+					}
+					notRun, wentSilent := runDNSCasesUntilSilent(t, server, false, cases)
+					if wentSilent {
+						silent = true
+						t.Fatalf("%s stopped answering DNS queries; %d of the %d cases for %s were not run", server, notRun, len(cases), d.cut)
+					}
+				})
+				if silent {
+					t.Fatalf("%s stopped answering DNS queries; the checks of %d of its %d delegations were not run", server, len(tg.delegations)-i-1, len(tg.delegations))
+				}
+			}
+		})
+	}
+}
+
+// expectReferral checks a referral to the delegation: dnsCase.authoritative only asserts that AA
+// is set, so the cleared AA flag is checked here.
+func expectReferral(d targetDelegation) func(*testing.T, *dns.Msg) {
+	return func(t *testing.T, resp *dns.Msg) {
+		t.Helper()
+		if resp.Authoritative {
+			t.Errorf("AA flag is set, want it clear on a referral to %s", d.cut)
+		}
+		if len(resp.Answer) != 0 {
+			t.Errorf("got %d answers, want none in a referral to %s", len(resp.Answer), d.cut)
+		}
+
+		records, err := recordsOfType[*dns.NS](resp.Ns, d.cut, dns.TypeNS)
+		if err != nil {
+			t.Errorf("authority section, want only the NS records of %s: %v", d.cut, err)
+		} else {
+			got := make([]string, len(records))
+			for i, record := range records {
+				got[i] = strings.ToLower(record.Ns)
+			}
+			slices.Sort(got)
+			want := slices.Sorted(slices.Values(d.nameServers))
+			if !slices.Equal(got, want) {
+				t.Errorf("authority NS targets = %v, want %v (any order)", got, want)
+			}
+		}
+
+		for _, nameServer := range slices.Sorted(maps.Keys(d.glue)) {
+			for _, want := range d.glue[nameServer] {
+				if !hasGlue(resp.Extra, nameServer, want) {
+					t.Errorf("additional section has no glue record %s for %s, want one", want, nameServer)
+				}
+			}
+		}
+	}
+}
+
+// hasGlue reports whether extra holds the glue record for want: an A record for an IPv4 address
+// and an AAAA record for an IPv6 one, so an IPv4-mapped AAAA record cannot stand in for missing A
+// glue.
+func hasGlue(extra []dns.RR, nameServer string, want netip.Addr) bool {
+	for _, rr := range extra {
+		if rr.Header().Class != dns.ClassINET || !strings.EqualFold(rr.Header().Name, nameServer) {
+			continue
+		}
+		switch record := rr.(type) {
+		case *dns.A:
+			if addr, ok := netip.AddrFromSlice(record.A); ok && want.Is4() && addr.Unmap() == want {
+				return true
+			}
+		case *dns.AAAA:
+			if addr, ok := netip.AddrFromSlice(record.AAAA); ok && want.Is6() && addr == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func expectNoNSInAuthority(t *testing.T, resp *dns.Msg) {
+	t.Helper()
+	for _, rr := range resp.Ns {
+		if rr.Header().Rrtype == dns.TypeNS {
+			t.Errorf("authority section contains the NS record %q, want no NS record outside a referral", rr)
+		}
+	}
+}
+
+func TestExpectReferralAcceptsWellFormedReferral(t *testing.T) {
+	d := targetDelegation{
+		cut:         "sub.example.com.",
+		nameServers: []string{"ns1.sub.example.com.", "ns.other.test."},
+		glue:        map[string][]netip.Addr{"ns1.sub.example.com.": {netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}},
+	}
+	resp := new(dns.Msg)
+	resp.SetQuestion("WwW.SuB.ExAmPlE.CoM.", dns.TypeA)
+	resp.Response = true
+	for _, record := range []string{"SUB.example.com. 300 IN NS NS.OTHER.TEST.", "sub.example.com. 300 IN NS ns1.sub.example.com."} {
+		resp.Ns = append(resp.Ns, mustRR(t, record))
+	}
+	for _, record := range []string{"ns1.sub.example.com. 300 IN AAAA 2001:db8::1", "ns1.sub.example.com. 300 IN A 192.0.2.1"} {
+		resp.Extra = append(resp.Extra, mustRR(t, record))
+	}
+	resp.SetEdns0(1232, false)
+
+	expectReferral(d)(t, resp)
+}
+
+func mustRR(t *testing.T, record string) dns.RR {
+	t.Helper()
+	rr, err := dns.NewRR(record)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", record, err)
+	}
+	return rr
+}
+
+func TestHasGlue(t *testing.T) {
+	const nameServer = "ns1.sub.example.com."
+	tests := []struct {
+		name  string
+		extra []string
+		want  string
+		found bool
+	}{
+		{name: "A record for IPv4 glue", extra: []string{"ns1.sub.example.com. 300 IN A 192.0.2.1"}, want: "192.0.2.1", found: true},
+		{name: "AAAA record for IPv6 glue", extra: []string{"ns1.sub.example.com. 300 IN AAAA 2001:db8::1"}, want: "2001:db8::1", found: true},
+		{name: "owner in a different case", extra: []string{"NS1.Sub.Example.COM. 300 IN A 192.0.2.1"}, want: "192.0.2.1", found: true},
+		{name: "IPv4-mapped AAAA record instead of A glue", extra: []string{"ns1.sub.example.com. 300 IN AAAA ::ffff:192.0.2.1"}, want: "192.0.2.1", found: false},
+		{name: "A record for IPv4-mapped IPv6 glue", extra: []string{"ns1.sub.example.com. 300 IN A 192.0.2.1"}, want: "::ffff:192.0.2.1", found: false},
+		{name: "A record of another name server", extra: []string{"ns2.sub.example.com. 300 IN A 192.0.2.1"}, want: "192.0.2.1", found: false},
+		{name: "A record with another address", extra: []string{"ns1.sub.example.com. 300 IN A 192.0.2.2"}, want: "192.0.2.1", found: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var extra []dns.RR
+			for _, record := range tt.extra {
+				extra = append(extra, mustRR(t, record))
+			}
+			if got := hasGlue(extra, nameServer, netip.MustParseAddr(tt.want)); got != tt.found {
+				t.Errorf("hasGlue(%q, %s) = %t, want %t", tt.extra, tt.want, got, tt.found)
+			}
 		})
 	}
 }

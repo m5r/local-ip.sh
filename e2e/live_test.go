@@ -22,9 +22,14 @@ func TestLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("target: app %s, domain %s, nameservers %v, staging CA %t", tg.app, tg.domain, tg.nameServers, tg.stagingCA)
+	cuts := make([]string, len(tg.delegations))
+	for i, d := range tg.delegations {
+		cuts[i] = d.cut
+	}
+	t.Logf("target: app %s, domain %s, nameservers %v, staging CA %t, delegations %v", tg.app, tg.domain, tg.nameServers, tg.stagingCA, cuts)
 
 	t.Run("AuthoritativeAnswers", func(t *testing.T) { authoritativeAnswers(t, tg) })
+	t.Run("Delegations", func(t *testing.T) { delegationChecks(t, tg) })
 	t.Run("PublicResolvers", func(t *testing.T) { publicResolverAnswers(t, tg) })
 	t.Run("Website", func(t *testing.T) { website(t, tg) })
 	t.Run("WildcardCertificate", func(t *testing.T) { wildcardCertificate(t, tg) })

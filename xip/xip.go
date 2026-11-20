@@ -3,8 +3,10 @@ package xip
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,8 @@ type Xip struct {
 	dnsPort     uint
 	recordsMu   sync.RWMutex
 	records     map[string]hardcodedRecord
+	zoneFile    string
+	delegations *zoneCuts
 }
 
 type Option func(*Xip)
@@ -40,6 +44,12 @@ func WithEmail(email string) Option {
 func WithDnsPort(port uint) Option {
 	return func(x *Xip) {
 		x.dnsPort = port
+	}
+}
+
+func WithZoneFile(path string) Option {
+	return func(x *Xip) {
+		x.zoneFile = path
 	}
 }
 
@@ -359,6 +369,16 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 	}
 
 	question := message.Question[0]
+	if cut, d, ok := xip.delegations.find(question.Name); ok {
+		// A DS RRset at a zone cut belongs to the parent zone (RFC 4035 section 3.1.4.1).
+		if question.Qtype != dns.TypeDS || dns.CanonicalName(question.Name) != cut {
+			message.Authoritative = false
+			message.Ns = append(message.Ns, d.nameServers...)
+			message.Extra = append(message.Extra, d.glue...)
+			return
+		}
+	}
+
 	switch question.Qtype {
 	case dns.TypeA:
 		xip.handleA(question, message)
@@ -466,13 +486,50 @@ func (xip *Xip) initNameServers(nameServers []string) {
 	xip.records[fmt.Sprintf("_acme-challenge.%s.", xip.domain)] = hardcodedRecord{TXT: []string{}}
 }
 
-func NewXip(opts ...Option) (xip *Xip) {
+func (xip *Xip) loadZoneFile() error {
+	file, err := os.Open(xip.zoneFile)
+	if err != nil {
+		return fmt.Errorf("opening zone file %s: %w", xip.zoneFile, err)
+	}
+	defer file.Close()
+
+	server := zoneServer{
+		origin:   xip.domain,
+		reserved: append(slices.Clone(xip.nameServers), fmt.Sprintf("_acme-challenge.%s.", xip.domain)),
+	}
+	xip.recordsMu.RLock()
+	for _, name := range xip.nameServers {
+		for _, ip := range xip.records[name].A {
+			if addr, ok := netip.AddrFromSlice(ip); ok {
+				server.addresses = append(server.addresses, addr.Unmap())
+			}
+		}
+	}
+	xip.recordsMu.RUnlock()
+
+	delegations, err := parseDelegations(file, xip.zoneFile, server)
+	if err != nil {
+		return err
+	}
+	xip.delegations = delegations
+
+	cuts := delegations.sortedCuts()
+	utils.Logger.Info().
+		Str("zone_file", xip.zoneFile).
+		Int("delegations", len(cuts)).
+		Strs("cuts", cuts).
+		Msg("Loaded zone file")
+	return nil
+}
+
+func NewXip(opts ...Option) (*Xip, error) {
 	config := utils.GetConfig()
-	xip = &Xip{
-		domain:  config.Domain,
-		email:   config.Email,
-		dnsPort: config.DnsPort,
-		records: initialRecords(),
+	xip := &Xip{
+		domain:   config.Domain,
+		email:    config.Email,
+		dnsPort:  config.DnsPort,
+		records:  initialRecords(),
+		zoneFile: config.ZoneFile,
 	}
 
 	for _, opt := range opts {
@@ -483,6 +540,12 @@ func NewXip(opts ...Option) (xip *Xip) {
 		xip.initNameServers(config.NameServers)
 	}
 
+	if xip.zoneFile != "" {
+		if err := xip.loadZoneFile(); err != nil {
+			return nil, err
+		}
+	}
+
 	xip.server = dns.Server{
 		Addr: fmt.Sprintf(":%d", xip.dnsPort),
 		Net:  "udp",
@@ -491,5 +554,5 @@ func NewXip(opts ...Option) (xip *Xip) {
 	zone := fmt.Sprintf("%s.", xip.domain)
 	dns.HandleFunc(zone, xip.handleDnsRequest)
 
-	return xip
+	return xip, nil
 }
