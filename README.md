@@ -43,6 +43,16 @@ local-ip.sh can be configured through environment variables or CLI flags
 
 A [reference docker compose file](./compose.yml) is available for deployments using Docker.
 
+## Testing
+
+- `make check` fails if any Go file is not `gofmt`-clean, then runs `go vet` and `go test -race` on every package. It only looks at files git knows about (tracked, or untracked and not ignored), and it needs no network: the live suite is skipped unless `E2E_FLY_CONFIG` is set.
+- `make e2e` runs the live end-to-end suite against the staging deployment described by `fly.staging.toml` (the default).
+- `make e2e FLY_CONFIG=fly.toml` runs the same suite against production.
+
+The live suite reads the zone, nameserver addresses, admin email and certificate authority from the Fly config file. It only reads from the target: it sends DNS queries to each nameserver and HTTP GET requests to the website, including the published wildcard certificate and key, which it keeps in memory. It also queries the public resolvers `1.1.1.1`, `8.8.8.8` and `9.9.9.10`, all of which must answer. DNS queries that get no response are retried with growing pauses, and every lost attempt is reported in the test output.
+
+Prerequisites for the live suite: Go, outbound IPv4 UDP port 53, TCP port 80 and TCP port 443, and the ability to listen on a loopback port.
+
 ## Self-hosting
 
 I'm currently hosting [local-ip.sh](https://local-ip.sh) at [Fly.io](https://fly.io) but you can host the service yourself if you're into that kind of thing. Note that you will need to edit your domain's glue records so make sure your registrar allows it.
