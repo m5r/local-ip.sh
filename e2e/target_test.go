@@ -217,6 +217,9 @@ func loadTarget(configPath string) (*target, error) {
 	if err := checkProbes(tg); err != nil {
 		return nil, fmt.Errorf("%s: %w", configPath, err)
 	}
+	if err := checkTransportSets(tg); err != nil {
+		return nil, fmt.Errorf("%s: %w", configPath, err)
+	}
 
 	return tg, nil
 }
@@ -543,7 +546,35 @@ func TestLoadStagingConfig(t *testing.T) {
 		{`e2e-alias.xip-staging.local-ip.sh. 600 IN CNAME target.example.net.`},
 		{`_e2e._tcp.xip-staging.local-ip.sh. 300 IN SRV 0 0 443 target.example.net.`},
 		{`xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh test instance"`},
+		stagingTXTRecords(udpTXTLabel, 4),
+		stagingTXTRecords(tcpTXTLabel, 12),
 	})
+	for _, label := range []string{udpTXTLabel, tcpTXTLabel} {
+		set, ok := tg.txtSetAt(label)
+		if !ok {
+			t.Errorf("no TXT set at %s, want one for the transport cases", label)
+			continue
+		}
+		var sizes []string
+		for _, form := range []struct{ compress, withOPT bool }{{true, false}, {false, false}, {true, true}, {false, true}} {
+			n, err := replySize(set, form.compress, form.withOPT)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sizes = append(sizes, fmt.Sprintf("compressed %t with OPT %t: %d", form.compress, form.withOPT, n))
+		}
+		t.Logf("reply sizes for %s: %s", set.owner, strings.Join(sizes, ", "))
+	}
+}
+
+// stagingTXTRecords spells the TXT set the staging zone file declares at the label: n records, each of one string of 180 octets that starts with its position.
+func stagingTXTRecords(label string, n int) []string {
+	records := make([]string, n)
+	for i := range n {
+		prefix := fmt.Sprintf("%s record %d of %d ", label, i+1, n)
+		records[i] = fmt.Sprintf(`%s.xip-staging.local-ip.sh. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
+	}
+	return records
 }
 
 func writeConfig(t *testing.T, content string) string {
@@ -1250,6 +1281,51 @@ func TestLoadTargetRejectsZoneFileThatClaimsAProbeName(t *testing.T) {
 			writeZoneFile(t, filepath.Dir(configPath), "test.zone", tt.zone)
 
 			_, err := loadTarget(configPath)
+			if err == nil {
+				t.Fatal("loadTarget succeeded, want an error")
+			}
+			for _, want := range append([]string{configPath}, tt.wantErr...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadTargetChecksTransportSets(t *testing.T) {
+	txtSet := func(label string, n, octets int) string {
+		var b strings.Builder
+		for i := range n {
+			fmt.Fprintf(&b, "%s TXT \"%d%s\"\n", label, i, strings.Repeat("x", octets-1))
+		}
+		return b.String()
+	}
+	tests := []struct {
+		name    string
+		zone    string
+		wantErr []string
+	}{
+		{name: "accepts sets of the sizes the cases rely on", zone: txtSet(udpTXTLabel, 4, 180) + txtSet(tcpTXTLabel, 12, 180)},
+		{name: "accepts a zone file without the sets", zone: "www A 192.0.2.80\n"},
+		{name: "rejects a set at the UDP label that fits a reply without EDNS", zone: txtSet(udpTXTLabel, 2, 180), wantErr: []string{"e2e-txt-udp.example.com.", "without EDNS, want more than 512"}},
+		{name: "rejects a set at the UDP label that does not fit a reply with EDNS", zone: txtSet(udpTXTLabel, 6, 180), wantErr: []string{"e2e-txt-udp.example.com.", "with EDNS, want less than 1232"}},
+		{name: "rejects a set at the TCP label that fits a reply with EDNS", zone: txtSet(tcpTXTLabel, 4, 180), wantErr: []string{"e2e-txt-tcp.example.com.", "with EDNS, want more than 1232"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv(map[string]string{"XIP_ZONE_FILE": `"/etc/local-ip.zone"`})
+			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"test.zone\"\n")
+			writeZoneFile(t, filepath.Dir(configPath), "test.zone", tt.zone)
+
+			_, err := loadTarget(configPath)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("loadTarget refused the zone file: %v", err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("loadTarget succeeded, want an error")
 			}

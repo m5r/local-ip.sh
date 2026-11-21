@@ -182,7 +182,7 @@ func splitTXT(value string) []string {
 	return append(parts, value)
 }
 
-// Forwarder serves DNS over TCP on a loopback port and relays every query over UDP to a target that is set later. Pebble only asks a custom resolver over TCP and the server under test only listens on UDP; the target is set later because the server needs the directory URL before it binds its port. A UDP answer is relayed as it is, truncated or not.
+// Forwarder serves DNS over TCP on a loopback port and relays every query over UDP to a target that is set later. Pebble needs the address of its resolver when it starts, while the server under test needs the directory URL before it binds its port, so the forwarder stands in front of the server until the server's address is known. A UDP answer is relayed as it is, truncated or not.
 type Forwarder struct {
 	// Address is the TCP address to give to Start.
 	Address string

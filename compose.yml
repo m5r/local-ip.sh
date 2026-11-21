@@ -12,6 +12,7 @@ services:
             # XIP_STAGING: true
         ports:
             - 53:53/udp
+            - 53:53/tcp
             - 80:80/tcp
             - 443:443/tcp
 

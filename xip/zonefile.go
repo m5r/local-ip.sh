@@ -13,10 +13,9 @@ import (
 
 const zoneFileDefaultTTL = 300
 
-// maxResponseSize is the largest response the server may send, whatever its kind.
-// Responses are never truncated and the server does not listen on TCP, so every response must fit in a classic 512-octet UDP response; the zone file and the configuration are checked against this limit at start.
-// This limit goes away when responses can be truncated and retried over TCP.
-const maxResponseSize = dns.MinMsgSize
+// maxResponseSize is the largest reply the server may build, measured without an OPT record: a reply that does not fit in a DNS message once the OPT record of an EDNS query is added would be truncated even over TCP, leaving a resolver no transport to get it whole.
+// The checks apply it wherever input without a bound of its own decides the size of a reply: the zone file, the list of name servers and the challenge values.
+const maxResponseSize = dns.MaxMsgSize - optRecordLength
 
 const maxNameWireLength = 255
 
@@ -418,7 +417,7 @@ func checkAnswerSizes(zoneRecords []dns.RR, file string) error {
 			return fmt.Errorf("zone file %s: building the answer for %s %s: %w", file, key.owner, dns.Type(key.rrtype), err)
 		}
 		if size > maxResponseSize {
-			return fmt.Errorf("zone file %s: the answer for %s %s takes %d octets, more than the limit of %d octets for a UDP response", file, key.owner, dns.Type(key.rrtype), size, maxResponseSize)
+			return fmt.Errorf("zone file %s: the answer for %s %s takes %d octets, more than the limit of %d octets for a DNS message", file, key.owner, dns.Type(key.rrtype), size, maxResponseSize)
 		}
 	}
 	return nil
@@ -443,7 +442,7 @@ func (zc *zoneCuts) checkReferralSizes(file string) error {
 			return fmt.Errorf("zone file %s: delegation %s: building the largest referral: %w", file, cut, err)
 		}
 		if size > maxResponseSize {
-			return fmt.Errorf("zone file %s: delegation %s: the largest referral takes %d octets, more than the limit of %d octets for a UDP response", file, cut, size, maxResponseSize)
+			return fmt.Errorf("zone file %s: delegation %s: the largest referral takes %d octets, more than the limit of %d octets for a DNS message", file, cut, size, maxResponseSize)
 		}
 	}
 	return nil

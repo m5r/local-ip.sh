@@ -36,6 +36,17 @@ min_machines_running = 0
 [[services.ports]]
 port = 53
 
+# DNS over TCP, for the replies that do not fit in UDP. Fly delivers TCP to a socket on any interface, unlike UDP.
+[[services]]
+protocol = "tcp"
+internal_port = 53
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 0
+
+[[services.ports]]
+port = 53
+
 [[services]]
 protocol = "tcp"
 internal_port = 80

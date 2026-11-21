@@ -113,7 +113,8 @@ func newConfig(t *testing.T, logs *logBuffer) app.Config {
 		Domain:          testDomain,
 		Email:           "admin@" + testDomain,
 		NameServers:     []string{"192.0.2.53"},
-		DNSAddress:      "127.0.0.1:0",
+		DNSUDPAddress:   "127.0.0.1:0",
+		DNSTCPAddress:   "127.0.0.1:0",
 		HTTPAddress:     "127.0.0.1:0",
 		HTTPSAddress:    "127.0.0.1:0",
 		StateDir:        t.TempDir(),
@@ -132,7 +133,7 @@ func withAuthority(t *testing.T, cfg *app.Config) (*acmetest.CA, func(*app.App))
 	ca := acmetest.Start(t, forwarder.Address, time.Hour)
 	cfg.DirectoryURL = ca.DirectoryURL
 	cfg.TrustedRoots = ca.APIRoots
-	return ca, func(a *app.App) { forwarder.SetTarget(a.DNSAddr().String()) }
+	return ca, func(a *app.App) { forwarder.SetTarget(a.DNSUDPAddr().String()) }
 }
 
 type running struct {
@@ -183,26 +184,29 @@ func (r *running) requireRunning(t *testing.T) {
 	}
 }
 
-func query(name string, qtype uint16, server string) (*dns.Msg, error) {
-	client := &dns.Client{Net: "udp", Timeout: dnsTimeout}
+func query(network, name string, qtype uint16, server string) (*dns.Msg, error) {
+	client := &dns.Client{Net: network, Timeout: dnsTimeout}
 	message := new(dns.Msg)
 	message.SetQuestion(dns.Fqdn(name), qtype)
 	answer, _, err := client.Exchange(message, server)
 	return answer, err
 }
 
-// checkAddressAnswer fails the test unless 10-0-0-1.app.test A is answered with 10.0.0.1.
+// checkAddressAnswer fails the test unless 10-0-0-1.app.test A is answered with 10.0.0.1 over UDP and over TCP.
 func checkAddressAnswer(t *testing.T, a *app.App) {
 	t.Helper()
-	if err := addressAnswer(a.DNSAddr().String()); err != nil {
+	if err := addressAnswer("udp", a.DNSUDPAddr().String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := addressAnswer("tcp", a.DNSTCPAddr().String()); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func addressAnswer(server string) error {
-	answer, err := query("10-0-0-1."+testDomain, dns.TypeA, server)
+func addressAnswer(network, server string) error {
+	answer, err := query(network, "10-0-0-1."+testDomain, dns.TypeA, server)
 	if err != nil {
-		return fmt.Errorf("querying 10-0-0-1.%s A: %w", testDomain, err)
+		return fmt.Errorf("querying 10-0-0-1.%s A over %s: %w", testDomain, network, err)
 	}
 	if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
 		return fmt.Errorf("10-0-0-1.%s A: rcode %s with %d answers, want one", testDomain, dns.RcodeToString[answer.Rcode], len(answer.Answer))
@@ -400,7 +404,7 @@ func TestFirstStartToRenewal(t *testing.T) {
 
 	checkStateDirectory(t, cfg.StateDir)
 
-	challenge, err := query("_acme-challenge."+testDomain, dns.TypeTXT, r.DNSAddr().String())
+	challenge, err := query("udp", "_acme-challenge."+testDomain, dns.TypeTXT, r.DNSUDPAddr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +414,7 @@ func TestFirstStartToRenewal(t *testing.T) {
 		t.Errorf("_acme-challenge TXT authority: %v, want an SOA with TTL 0", challenge.Ns[0])
 	}
 
-	probes := startProber(r.DNSAddr().String())
+	probes := startProber(r.DNSUDPAddr().String())
 	r.RenewCertificates()
 	renewed := waitForServed(t, r.App, ca.IssuerRoots, "renewing both certificates", func(s served) bool {
 		return !sameSerial(s.siteLeaf, first.siteLeaf) && !sameSerial(s.chain[0], first.chain[0])
@@ -483,7 +487,7 @@ func startProber(server string) *prober {
 		defer close(p.finished)
 		for ctx.Err() == nil {
 			p.sent.Add(1)
-			if err := addressAnswer(server); err != nil {
+			if err := addressAnswer("udp", server); err != nil {
 				p.mu.Lock()
 				p.failures = append(p.failures, err)
 				p.mu.Unlock()
@@ -628,18 +632,37 @@ func TestNewReportsBindErrors(t *testing.T) {
 		set  func(*app.Config)
 		want string
 	}{
+		{name: "DNS over TCP", set: func(cfg *app.Config) { cfg.DNSTCPAddress = held.Addr().String() }, want: "listening for DNS over TCP on"},
 		{name: "HTTP", set: func(cfg *app.Config) { cfg.HTTPAddress = held.Addr().String() }, want: "listening for HTTP on"},
 		{name: "HTTPS", set: func(cfg *app.Config) { cfg.HTTPSAddress = held.Addr().String() }, want: "listening for HTTPS on"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := newConfig(t, &logBuffer{})
+			cfg.DNSUDPAddress = freeUDPAddress(t)
 			test.set(&cfg)
 			_, err := app.New(cfg)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Errorf("New returned %v, want an error containing %q", err, test.want)
 			}
+			// The UDP socket is bound first, so it shows that what New bound before the failure is closed again.
+			rebound, err := net.ListenPacket("udp", cfg.DNSUDPAddress)
+			if err != nil {
+				t.Fatalf("the DNS UDP socket stays bound after New failed: %v", err)
+			}
+			rebound.Close()
 		})
 	}
+}
+
+// freeUDPAddress is a loopback UDP address that was free a moment ago.
+func freeUDPAddress(t *testing.T) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	return conn.LocalAddr().String()
 }
 
 func TestNewRejectsInvalidConfig(t *testing.T) {

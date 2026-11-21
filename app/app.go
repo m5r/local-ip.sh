@@ -29,10 +29,11 @@ type Config struct {
 	// ZoneFile is the path of the delegations file; empty means none.
 	ZoneFile string
 
-	// DNSAddress (UDP), HTTPAddress and HTTPSAddress (TCP) are listen addresses in the form net.Listen takes.
-	DNSAddress   string
-	HTTPAddress  string
-	HTTPSAddress string
+	// DNSUDPAddress and DNSTCPAddress are where the DNS server listens over each transport, HTTPAddress and HTTPSAddress where the web server listens; all are listen addresses in the form net.Listen takes. The DNS addresses are separate because a host may deliver UDP and TCP to different interfaces, as Fly does.
+	DNSUDPAddress string
+	DNSTCPAddress string
+	HTTPAddress   string
+	HTTPSAddress  string
 
 	// StateDir holds the ACME account and the certificates, StaticDir the website's files.
 	StateDir  string
@@ -54,13 +55,14 @@ type App struct {
 	web          *web.Server
 
 	dnsConn       net.PacketConn
+	dnsListener   net.Listener
 	httpListener  net.Listener
 	httpsListener net.Listener
 
 	ran atomic.Bool
 }
 
-// New builds the DNS server, the certificate manager and the web server, which loads the zone file and the stored certificates, then binds the three sockets. Nothing is served yet. When it returns an error nothing stays bound.
+// New builds the DNS server, the certificate manager and the web server, which loads the zone file and the stored certificates, then binds the four sockets. Nothing is served yet. When it returns an error nothing stays bound.
 func New(cfg Config) (*App, error) {
 	domain, err := names.Canonical(cfg.Domain)
 	if err != nil {
@@ -119,11 +121,17 @@ func (a *App) bind(cfg Config) (err error) {
 		}
 	}()
 
-	a.dnsConn, err = net.ListenPacket("udp", cfg.DNSAddress)
+	a.dnsConn, err = net.ListenPacket("udp", cfg.DNSUDPAddress)
 	if err != nil {
-		return fmt.Errorf("listening for DNS on %s: %w", cfg.DNSAddress, err)
+		return fmt.Errorf("listening for DNS over UDP on %s: %w", cfg.DNSUDPAddress, err)
 	}
 	bound = append(bound, a.dnsConn)
+
+	a.dnsListener, err = net.Listen("tcp", cfg.DNSTCPAddress)
+	if err != nil {
+		return fmt.Errorf("listening for DNS over TCP on %s: %w", cfg.DNSTCPAddress, err)
+	}
+	bound = append(bound, a.dnsListener)
 
 	a.httpListener, err = net.Listen("tcp", cfg.HTTPAddress)
 	if err != nil {
@@ -138,8 +146,11 @@ func (a *App) bind(cfg Config) (err error) {
 	return nil
 }
 
-// DNSAddr is the UDP address New bound for DNS.
-func (a *App) DNSAddr() net.Addr { return a.dnsConn.LocalAddr() }
+// DNSUDPAddr is the UDP address New bound for DNS.
+func (a *App) DNSUDPAddr() net.Addr { return a.dnsConn.LocalAddr() }
+
+// DNSTCPAddr is the TCP address New bound for DNS.
+func (a *App) DNSTCPAddr() net.Addr { return a.dnsListener.Addr() }
 
 // HTTPAddr is the TCP address New bound for plain HTTP.
 func (a *App) HTTPAddr() net.Addr { return a.httpListener.Addr() }
@@ -168,7 +179,7 @@ func (a *App) Run(ctx context.Context) error {
 			}
 		})
 	}
-	run("DNS server", func(ctx context.Context) error { return a.dns.Serve(ctx, a.dnsConn) })
+	run("DNS server", func(ctx context.Context) error { return a.dns.Serve(ctx, a.dnsConn, a.dnsListener) })
 	run("web server", func(ctx context.Context) error { return a.web.Run(ctx, a.httpListener, a.httpsListener) })
 	run("certificate manager", a.certificates.Run)
 	return group.Wait()

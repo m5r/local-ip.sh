@@ -1,26 +1,20 @@
 package xip
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/mail"
 	"net/netip"
 	"os"
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 	"local-ip.sh/internal/names"
 	"local-ip.sh/utils"
 )
-
-// shutdownTimeout bounds how long Serve waits for the handlers in flight once its context is cancelled.
-const shutdownTimeout = 2 * time.Second
 
 type Xip struct {
 	nameServerAddresses []string
@@ -86,11 +80,24 @@ func emailToRname(email string) string {
 func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) {
 	message := new(dns.Msg)
 	message.SetReply(request)
-	message.Compress = true
 	message.RecursionAvailable = false
 	// The server validates nothing, so the CD flag SetReply copied from the query would be a false claim (RFC 8906 section 8.1.3.1).
 	message.CheckingDisabled = false
-	xip.answer(request, message)
+
+	// A query whose EDNS the server does not understand gets the EDNS error alone, before any other rule looks at it (RFC 6891 sections 6.1.1 and 6.1.3).
+	queryOPT, optCount := ednsOf(request)
+	switch {
+	case optCount > 1:
+		message.Rcode = dns.RcodeFormatError
+	case queryOPT != nil && queryOPT.Version() != 0:
+		message.Rcode = dns.RcodeBadVers
+	default:
+		xip.answer(request, message)
+	}
+	if queryOPT != nil {
+		message.Extra = append(message.Extra, replyOPT(queryOPT.Do()))
+	}
+	message.Truncate(replyLimit(response.LocalAddr(), queryOPT))
 
 	if err := response.WriteMsg(message); err != nil {
 		event := xip.logger.Error().Err(err)
@@ -176,7 +183,11 @@ func (xip *Xip) logResolved(message *dns.Msg) {
 	}
 
 	rcode, ok := dns.RcodeToString[message.Rcode]
-	if !ok {
+	switch {
+	case message.Rcode == dns.RcodeBadVers:
+		// The library's table names 16 after its meaning in a TSIG record, BADSIG, but in a reply's header and OPT record it is BADVERS.
+		rcode = "BADVERS"
+	case !ok:
 		rcode = fmt.Sprintf("RCODE%d", message.Rcode)
 	}
 	event.Str("rcode", rcode)
@@ -191,53 +202,6 @@ func (xip *Xip) logResolved(message *dns.Msg) {
 		event.Str("FLY_REGION", flyRegion)
 	}
 	event.Msg("resolved")
-}
-
-// Serve answers the queries arriving on conn until ctx is cancelled, then stops reading, waits for the handlers in flight and returns nil.
-// It returns the error of the read loop if that stops by itself. It takes ownership of conn and closes it in every case.
-func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn) error {
-	if conn == nil {
-		return errors.New("xip: serve: no socket")
-	}
-	// The server closes conn on most paths but not when ActivateAndServe fails before reading, and a second Close is harmless.
-	defer conn.Close()
-
-	started := make(chan struct{})
-	server := &dns.Server{
-		PacketConn:        conn,
-		Handler:           dns.HandlerFunc(xip.handleDnsRequest),
-		NotifyStartedFunc: func() { close(started) },
-	}
-	served := make(chan error, 1)
-	go func() { served <- server.ActivateAndServe() }()
-
-	// Shutdown refuses a server that has not started, so the context is only watched once the read loop runs.
-	select {
-	case <-started:
-	case err := <-served:
-		return fmt.Errorf("xip: serving DNS on %s: %w", conn.LocalAddr(), err)
-	}
-	xip.logger.Info().Str("dns_address", conn.LocalAddr().String()).Msg("Starting up DNS server")
-
-	select {
-	case err := <-served:
-		if err == nil {
-			return errors.New("xip: DNS read loop stopped without being shut down")
-		}
-		return fmt.Errorf("xip: serving DNS on %s: %w", conn.LocalAddr(), err)
-	case <-ctx.Done():
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancel()
-	if err := server.ShutdownContext(shutdownCtx); err != nil {
-		xip.logger.Warn().Err(err).Msg("DNS server did not shut down cleanly")
-	}
-	// ShutdownContext has closed the socket by now, on time or at its limit, which ends any handler blocked on its reply, so a handler can only still be busy writing a log line; waiting keeps the promise that no handler runs after Serve returns, and the wait is not bounded because it only happens during a shutdown, which the supervisor's kill timeout or a second signal ends if it hangs.
-	if err := <-served; err != nil {
-		return fmt.Errorf("xip: serving DNS on %s: %w", conn.LocalAddr(), err)
-	}
-	return nil
 }
 
 // NewXip builds a server for one zone. It requires a valid domain (WithDomain), a bare email address for the SOA record (WithEmail) and at least one IPv4 name server address (WithNameServers). It reads no process-wide configuration and binds no socket: see Serve.

@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode"
@@ -36,33 +38,64 @@ var publicResolvers = []netip.Addr{
 	netip.MustParseAddr("9.9.9.10"),
 }
 
-// dnsQuery is one question and the header flags it is sent with.
+// serverUDPSize is the UDP payload size a name server of the target advertises in the OPT record of every reply to a query with one.
+const serverUDPSize = 1232
+
+// ednsOPT is the OPT record a query carries. The zero value sends none: no query of the suite advertises a size of 0.
+type ednsOPT struct {
+	udpSize uint16
+	version uint8
+}
+
+// dnsQuery is one question, the header flags and the OPT record it is sent with, the transport it goes over and whether the reply is expected truncated.
 type dnsQuery struct {
 	name             string
 	qtype            uint16
 	qclass           uint16
 	recursion        bool
 	checkingDisabled bool
+	tcp              bool
+	edns             ednsOPT
+	truncated        bool
+	// followTruncation accepts a truncated reply, which the caller follows with the same question over TCP.
+	followTruncation bool
 }
 
 func (q dnsQuery) String() string {
-	return fmt.Sprintf("%s %s %s", q.name, dns.Class(q.qclass), dns.Type(q.qtype))
+	s := fmt.Sprintf("%s %s %s", q.name, dns.Class(q.qclass), dns.Type(q.qtype))
+	if q.edns != (ednsOPT{}) {
+		s += fmt.Sprintf(" with EDNS version %d size %d", q.edns.version, q.edns.udpSize)
+	}
+	if q.tcp {
+		s += " over TCP"
+	}
+	return s
 }
 
-// exchange sends one question over UDP and returns the first response it gets. Only timeouts and
-// network errors are retried; any decoded response is final whatever its rcode, so a wrong answer
-// is never hidden by a retry. A response is returned together with an error when it does not echo
-// the question or is truncated, since there is no TCP fallback to complete it.
+// exchange sends one question to port 53 of the server.
 func exchange(t *testing.T, server netip.Addr, q dnsQuery) (*dns.Msg, error) {
+	t.Helper()
+	return exchangeAt(t, netip.AddrPortFrom(server, 53), q)
+}
+
+// exchangeAt sends one question and returns the first response it gets. Only timeouts and network errors are retried; any decoded response is final whatever its rcode, so a wrong answer is never hidden by a retry. A response is returned together with an error when it does not echo the question or its TC flag is not the one the query expects: a truncated reply is only accepted where the query expects one or follows truncation itself.
+func exchangeAt(t *testing.T, server netip.AddrPort, q dnsQuery) (*dns.Msg, error) {
 	t.Helper()
 	query := new(dns.Msg)
 	query.SetQuestion(q.name, q.qtype)
 	query.Question[0].Qclass = q.qclass
 	query.RecursionDesired = q.recursion
 	query.CheckingDisabled = q.checkingDisabled
+	if q.edns != (ednsOPT{}) {
+		query.SetEdns0(q.edns.udpSize, false)
+		query.IsEdns0().SetVersion(q.edns.version)
+	}
 
 	client := &dns.Client{Net: "udp", Timeout: dnsAttemptTimeout}
-	address := netip.AddrPortFrom(server, 53).String()
+	if q.tcp {
+		client.Net = "tcp"
+	}
+	address := server.String()
 	attempts := len(dnsRetryPauses) + 1
 
 	var lastErr error
@@ -85,15 +118,14 @@ func exchange(t *testing.T, server netip.Addr, q dnsQuery) (*dns.Msg, error) {
 			if err := checkReplyHeader(q, resp); err != nil {
 				return resp, fmt.Errorf("response from %s for %s: %w", address, q, err)
 			}
-			if resp.Truncated {
-				return resp, fmt.Errorf("response from %s for %s is truncated (TC bit set)", address, q)
+			if err := checkTruncation(q, resp); err != nil {
+				return resp, fmt.Errorf("response from %s for %s: %w", address, q, err)
 			}
 			return resp, nil
 		}
 
 		t.Logf("DNS attempt %d/%d to %s for %s failed after %s: %v", attempt, attempts, address, q, time.Since(started).Round(time.Millisecond), err)
-		var netErr net.Error
-		if !errors.Is(err, context.DeadlineExceeded) && !errors.As(err, &netErr) {
+		if !lostAttempt(q, err) {
 			return nil, fmt.Errorf("querying %s for %s: %w", address, q, err)
 		}
 		lastErr = err
@@ -102,6 +134,15 @@ func exchange(t *testing.T, server netip.Addr, q dnsQuery) (*dns.Msg, error) {
 		}
 	}
 	return nil, fmt.Errorf("%w from %s for %s after %d attempt(s), last error: %w", errNoDNSResponse, address, q, made, lastErr)
+}
+
+// lostAttempt reports whether an attempt failed without a reply, as opposed to with one the client could not use. Over TCP that includes a connection the far side closes before a whole reply arrived: resolvers do so for some questions about names they have not cached, and a proxy does so while the service behind it starts, so it is a lost attempt like a UDP timeout.
+func lostAttempt(q dnsQuery, err error) bool {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) {
+		return true
+	}
+	return q.tcp && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
 }
 
 func pause(ctx context.Context, d time.Duration) bool {
@@ -127,6 +168,68 @@ func checkReplyHeader(q dnsQuery, resp *dns.Msg) error {
 		return fmt.Errorf("RD flag = %t, want %t as in the query", resp.RecursionDesired, q.recursion)
 	}
 	return nil
+}
+
+func checkTruncation(q dnsQuery, resp *dns.Msg) error {
+	switch {
+	case resp.Truncated && !q.truncated && !q.followTruncation:
+		return errors.New("reply is truncated (TC flag set), want it whole")
+	case !resp.Truncated && q.truncated:
+		return errors.New("TC flag is clear, want the reply truncated")
+	}
+	return nil
+}
+
+// checkReplyOPT checks the OPT record of a name server's reply against the query: none in reply to a query without one, and otherwise exactly one that advertises serverUDPSize, version 0, the DO flag of the query (always clear) and no options, whatever the rcode.
+func checkReplyOPT(q dnsQuery, resp *dns.Msg) error {
+	var opts []*dns.OPT
+	for _, rr := range resp.Extra {
+		if opt, ok := rr.(*dns.OPT); ok {
+			opts = append(opts, opt)
+		}
+	}
+	if q.edns == (ednsOPT{}) {
+		if len(opts) != 0 {
+			return fmt.Errorf("reply has %d OPT records, want none in reply to a query without one", len(opts))
+		}
+		return nil
+	}
+	if len(opts) != 1 {
+		return fmt.Errorf("reply has %d OPT records, want exactly one in reply to a query with one", len(opts))
+	}
+	opt := opts[0]
+	var problems []error
+	if opt.Hdr.Name != "." {
+		problems = append(problems, fmt.Errorf("OPT record is owned by %q, want the root", opt.Hdr.Name))
+	}
+	if opt.UDPSize() != serverUDPSize {
+		problems = append(problems, fmt.Errorf("OPT UDP size = %d, want %d", opt.UDPSize(), serverUDPSize))
+	}
+	if opt.Version() != 0 {
+		problems = append(problems, fmt.Errorf("OPT version = %d, want 0", opt.Version()))
+	}
+	if opt.Do() {
+		problems = append(problems, errors.New("OPT DO flag is set, want it clear as in the query"))
+	}
+	if len(opt.Option) != 0 {
+		problems = append(problems, fmt.Errorf("OPT record has %d options, want none", len(opt.Option)))
+	}
+	return errors.Join(problems...)
+}
+
+// withoutOPT is a copy of the reply without its OPT records, so the checks of the sections, written for replies without EDNS, see the same content whether the query carried one or not.
+func withoutOPT(resp *dns.Msg) *dns.Msg {
+	content := resp.Copy()
+	content.Extra = slices.DeleteFunc(content.Extra, func(rr dns.RR) bool { return rr.Header().Rrtype == dns.TypeOPT })
+	return content
+}
+
+// rcodeName names an rcode; the library's table names 16 after its meaning in a TSIG record, BADSIG, but in a reply's header and OPT record it is BADVERS.
+func rcodeName(rcode int) string {
+	if rcode == dns.RcodeBadVers {
+		return "BADVERS"
+	}
+	return dns.RcodeToString[rcode]
 }
 
 // checkQuestionEcho checks the echo of a question in class IN, the only class the prober asks in.
@@ -207,12 +310,18 @@ type dnsCase struct {
 	// qclass is IN when unset.
 	qclass           uint16
 	checkingDisabled bool
+	tcp              bool
+	edns             ednsOPT
+	truncated        bool
 	rcodes           []int
 	authoritative    bool
 	nonAuthoritative bool
 	// fromZoneFile marks a case generated from a declaration of the zone file, whose name is declared by construction.
 	fromZoneFile bool
-	check        func(t *testing.T, resp *dns.Msg)
+	// check sees the reply without its OPT record, which is checked on its own.
+	check func(t *testing.T, resp *dns.Msg)
+	// checkTruncated, where set, makes the case follow truncation as a resolver does: a truncated reply over UDP is held to checkTruncated and the question is asked again over TCP, whose reply is held to check. It sees the truncated reply without its OPT record.
+	checkTruncated func(t *testing.T, resp *dns.Msg)
 }
 
 // dnsPath says how a case's query reaches the zone.
@@ -226,7 +335,7 @@ const (
 )
 
 func (tc dnsCase) query(path dnsPath) dnsQuery {
-	q := dnsQuery{name: tc.qname, qtype: tc.qtype, qclass: tc.qclass, recursion: path == throughResolver, checkingDisabled: tc.checkingDisabled}
+	q := dnsQuery{name: tc.qname, qtype: tc.qtype, qclass: tc.qclass, recursion: path == throughResolver, checkingDisabled: tc.checkingDisabled, tcp: tc.tcp, edns: tc.edns, truncated: tc.truncated, followTruncation: tc.checkTruncated != nil}
 	if q.qclass == 0 {
 		q.qclass = dns.ClassINET
 	}
@@ -234,7 +343,7 @@ func (tc dnsCase) query(path dnsPath) dnsQuery {
 }
 
 // checkReplyOnPath checks the AA flag a case asks for, the owners of the answer records and, on a reply straight from a name server, the flags an authoritative-only server without DNSSEC never sets: it offers no recursion, validates nothing and so must not echo CD.
-// A name server owns its answer records by the question name exactly as asked (B4), which is also what keeps a reply within 512 octets whatever the case of the question; a resolver may spell the owner its own way.
+// A name server owns its answer records by the question name exactly as asked (B4), which is also what keeps the size of a reply the same whatever the case of the question; a resolver may spell the owner its own way.
 func checkReplyOnPath(tc dnsCase, path dnsPath, resp *dns.Msg) error {
 	var problems []error
 	if len(resp.Question) == 1 {
@@ -278,15 +387,25 @@ func runDNSCases(t *testing.T, server netip.Addr, path dnsPath, cases []dnsCase)
 	}
 }
 
-// runDNSCasesUntilSilent runs the cases as subtests until one gets no response at all, and reports
-// whether that happened and how many cases were left unrun.
+// runDNSCasesUntilSilent runs the cases as subtests until one gets no response at all over UDP, and reports whether that happened and how many cases were left unrun. A question over TCP that gets no response fails its case alone: a server without TCP still answers every other case.
 func runDNSCasesUntilSilent(t *testing.T, server netip.Addr, path dnsPath, cases []dnsCase) (notRun int, silent bool) {
 	t.Helper()
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := exchange(t, server, tc.query(path))
+			resp, truncated, q, err := askCase(t, netip.AddrPortFrom(server, 53), path, tc)
+			if truncated != nil {
+				if path == toNameServer {
+					if err := checkReplyOPT(tc.query(path), truncated); err != nil {
+						t.Errorf("truncated reply over UDP: %v", err)
+					}
+				}
+				tc.checkTruncated(t, withoutOPT(truncated))
+				if t.Failed() || err != nil {
+					t.Logf("truncated reply over UDP from %s:\n%s", server, truncated)
+				}
+			}
 			if err != nil {
-				silent = errors.Is(err, errNoDNSResponse)
+				silent = errors.Is(err, errNoDNSResponse) && !q.tcp
 				if resp != nil {
 					t.Logf("response:\n%s", resp)
 				}
@@ -301,15 +420,21 @@ func runDNSCasesUntilSilent(t *testing.T, server netip.Addr, path dnsPath, cases
 			if !slices.Contains(tc.rcodes, resp.Rcode) {
 				names := make([]string, len(tc.rcodes))
 				for i, rcode := range tc.rcodes {
-					names[i] = dns.RcodeToString[rcode]
+					names[i] = rcodeName(rcode)
 				}
-				t.Errorf("rcode = %s, want one of %v", dns.RcodeToString[resp.Rcode], names)
+				t.Errorf("rcode = %s, want one of %v", rcodeName(resp.Rcode), names)
 			}
-			if err := checkReplyOnPath(tc, path, resp); err != nil {
+			if path == toNameServer {
+				if err := checkReplyOPT(q, resp); err != nil {
+					t.Error(err)
+				}
+			}
+			content := withoutOPT(resp)
+			if err := checkReplyOnPath(tc, path, content); err != nil {
 				t.Error(err)
 			}
 			if tc.check != nil {
-				tc.check(t, resp)
+				tc.check(t, content)
 			}
 		})
 		if silent {
@@ -317,6 +442,20 @@ func runDNSCasesUntilSilent(t *testing.T, server netip.Addr, path dnsPath, cases
 		}
 	}
 	return 0, false
+}
+
+// askCase sends the question of the case and returns the reply to check, the query that got it, and the truncated reply over UDP it followed, if any. A case with checkTruncated that gets a truncated reply asks again over TCP within the same case, as a resolver does; that question does not follow truncation, so a truncated reply over TCP is an error.
+func askCase(t *testing.T, server netip.AddrPort, path dnsPath, tc dnsCase) (resp, truncated *dns.Msg, q dnsQuery, err error) {
+	t.Helper()
+	q = tc.query(path)
+	resp, err = exchangeAt(t, server, q)
+	if err != nil || !q.followTruncation || !resp.Truncated {
+		return resp, nil, q, err
+	}
+	truncated = resp
+	q.tcp, q.followTruncation = true, false
+	resp, err = exchangeAt(t, server, q)
+	return resp, truncated, q, err
 }
 
 func expectA(want netip.Addr) func(*testing.T, *dns.Msg) {
@@ -514,51 +653,92 @@ func requireZoneSOA(t *testing.T, server netip.Addr, tg *target) *dns.SOA {
 
 // checkRecordSet checks an answer that carries the declared record set, owned by the question name.
 func checkRecordSet(set targetRecordSet, resp *dns.Msg) error {
-	if len(resp.Question) != 1 {
-		return fmt.Errorf("question section has %d entries, want 1", len(resp.Question))
+	got, want, err := answerAndDeclaredRDATA(set, resp, func(ttl uint32) bool { return ttl == set.ttl })
+	if err != nil {
+		return err
 	}
-	qname := resp.Question[0].Name
-	got := make([]string, 0, len(resp.Answer))
-	for _, rr := range resp.Answer {
-		hdr := rr.Header()
-		if hdr.Rrtype != set.rrtype {
-			return fmt.Errorf("answer record %q is not of type %s", rr, dns.Type(set.rrtype))
-		}
-		if hdr.Class != dns.ClassINET {
-			return fmt.Errorf("answer record %q has class %s, want IN", rr, dns.Class(hdr.Class))
-		}
-		if !strings.EqualFold(hdr.Name, qname) {
-			return fmt.Errorf("answer record %q is owned by %q, want the question name %q", rr, hdr.Name, qname)
-		}
-		if hdr.Ttl != set.ttl {
-			return fmt.Errorf("answer record %q has TTL %d, want the declared %d", rr, hdr.Ttl, set.ttl)
-		}
-		fields, err := rdataFields(rr)
-		if err != nil {
-			return err
-		}
-		got = append(got, fields)
-	}
-	want := make([]string, 0, len(set.records))
-	for _, rr := range set.records {
-		fields, err := rdataFields(rr)
-		if err != nil {
-			return fmt.Errorf("declared record: %w", err)
-		}
-		want = append(want, fields)
-	}
-	slices.Sort(got)
-	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		return fmt.Errorf("answer RDATA = %q, want %q (any order)", got, want)
 	}
-	if len(resp.Ns) != 0 {
-		return fmt.Errorf("authority section has %d records, want none", len(resp.Ns))
+	return nil
+}
+
+// checkCachedRecordSet checks an answer through a resolver that carries the declared record set: a resolver counts the TTL down while the set sits in its cache.
+func checkCachedRecordSet(set targetRecordSet, resp *dns.Msg) error {
+	got, want, err := answerAndDeclaredRDATA(set, resp, func(ttl uint32) bool { return ttl <= set.ttl })
+	if err != nil {
+		return err
 	}
-	if len(resp.Extra) != 0 {
-		return fmt.Errorf("additional section has %d records, want none", len(resp.Extra))
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("answer RDATA = %q, want %q (any order)", got, want)
 	}
 	return nil
+}
+
+// checkPartOfRecordSet checks a truncated answer for the declared record set: the records that are there must be declared ones, each at most once, and at least one declared record must be missing, since a server truncates only when the whole set does not fit.
+func checkPartOfRecordSet(set targetRecordSet, resp *dns.Msg) error {
+	got, want, err := answerAndDeclaredRDATA(set, resp, func(ttl uint32) bool { return ttl == set.ttl })
+	if err != nil {
+		return err
+	}
+	remaining := slices.Clone(want)
+	for _, fields := range got {
+		i := slices.Index(remaining, fields)
+		if i < 0 {
+			return fmt.Errorf("answer record with RDATA %s is not one of the declared %q, or appears twice", fields, want)
+		}
+		remaining = slices.Delete(remaining, i, i+1)
+	}
+	if len(remaining) == 0 {
+		return fmt.Errorf("truncated answer carries all %d declared records, want some of them missing", len(want))
+	}
+	return nil
+}
+
+// answerAndDeclaredRDATA checks every answer record against the declared set's owner, type, class and a TTL that ttlOK accepts, requires the other sections empty, and returns the RDATA of the answer and of the declared set, each sorted.
+func answerAndDeclaredRDATA(set targetRecordSet, resp *dns.Msg, ttlOK func(uint32) bool) (got, want []string, err error) {
+	if len(resp.Question) != 1 {
+		return nil, nil, fmt.Errorf("question section has %d entries, want 1", len(resp.Question))
+	}
+	qname := resp.Question[0].Name
+	got = make([]string, 0, len(resp.Answer))
+	for _, rr := range resp.Answer {
+		hdr := rr.Header()
+		if hdr.Rrtype != set.rrtype {
+			return nil, nil, fmt.Errorf("answer record %q is not of type %s", rr, dns.Type(set.rrtype))
+		}
+		if hdr.Class != dns.ClassINET {
+			return nil, nil, fmt.Errorf("answer record %q has class %s, want IN", rr, dns.Class(hdr.Class))
+		}
+		if !strings.EqualFold(hdr.Name, qname) {
+			return nil, nil, fmt.Errorf("answer record %q is owned by %q, want the question name %q", rr, hdr.Name, qname)
+		}
+		if !ttlOK(hdr.Ttl) {
+			return nil, nil, fmt.Errorf("answer record %q has TTL %d, want the declared %d", rr, hdr.Ttl, set.ttl)
+		}
+		fields, err := rdataFields(rr)
+		if err != nil {
+			return nil, nil, err
+		}
+		got = append(got, fields)
+	}
+	want = make([]string, 0, len(set.records))
+	for _, rr := range set.records {
+		fields, err := rdataFields(rr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("declared record: %w", err)
+		}
+		want = append(want, fields)
+	}
+	if len(resp.Ns) != 0 {
+		return nil, nil, fmt.Errorf("authority section has %d records, want none", len(resp.Ns))
+	}
+	if len(resp.Extra) != 0 {
+		return nil, nil, fmt.Errorf("additional section has %d records, want none", len(resp.Extra))
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	return got, want, nil
 }
 
 // rdataFields spells the RDATA of a record field by field, names in canonical form, so that two records compare equal exactly when their data does.
@@ -637,6 +817,14 @@ func expectNameError(zoneSOA *dns.SOA) func(*testing.T, *dns.Msg) {
 
 func expectRecordSet(set targetRecordSet) func(*testing.T, *dns.Msg) {
 	return asCheck(func(resp *dns.Msg) error { return checkRecordSet(set, resp) })
+}
+
+func expectCachedRecordSet(set targetRecordSet) func(*testing.T, *dns.Msg) {
+	return asCheck(func(resp *dns.Msg) error { return checkCachedRecordSet(set, resp) })
+}
+
+func expectPartOfRecordSet(set targetRecordSet) func(*testing.T, *dns.Msg) {
+	return asCheck(func(resp *dns.Msg) error { return checkPartOfRecordSet(set, resp) })
 }
 
 var (
@@ -773,10 +961,101 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		dnsCase{name: "zone transfer AXFR", qname: zone, qtype: dns.TypeAXFR, rcodes: refused, nonAuthoritative: true, check: expectNoRecords},
 		dnsCase{name: "zone transfer IXFR", qname: zone, qtype: dns.TypeIXFR, rcodes: refused, nonAuthoritative: true, check: expectNoRecords},
 	)
+	return append(cases, transportCases(tg, zoneSOA)...)
+}
+
+// The zone file may declare a TXT set at each of these labels below the apex for the suite to verify truncation, EDNS and TCP with: every reply for the first is larger than 512 octets and smaller than serverUDPSize, every reply for the second is larger than serverUDPSize. checkTransportSets holds a declared set to that.
+const (
+	udpTXTLabel = "e2e-txt-udp"
+	tcpTXTLabel = "e2e-txt-tcp"
+)
+
+// txtSetAt returns the TXT set the zone file declares at the label below the apex, if any.
+func (tg *target) txtSetAt(label string) (targetRecordSet, bool) {
+	owner := label + "." + tg.zone()
+	i := slices.IndexFunc(tg.recordSets, func(set targetRecordSet) bool { return set.owner == owner && set.rrtype == dns.TypeTXT })
+	if i < 0 {
+		return targetRecordSet{}, false
+	}
+	return tg.recordSets[i], true
+}
+
+// transportCases are the cases of every name server that depend on the transport and on EDNS; the cases for the large TXT sets exist only where the zone file declares them.
+func transportCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
+	zone := tg.zone()
+	noError := []int{dns.RcodeSuccess}
+	edns := ednsOPT{udpSize: serverUDPSize}
+	unrelated, _ := outsideNames(zone)
+	cases := []dnsCase{
+		{name: "address over TCP", qname: "10-11-12-13." + zone, qtype: dns.TypeA, tcp: true, rcodes: noError, authoritative: true, check: expectA(netip.MustParseAddr("10.11.12.13"))},
+		{name: "EDNS version 1 gets BADVERS", qname: zone, qtype: dns.TypeSOA, edns: ednsOPT{udpSize: serverUDPSize, version: 1}, rcodes: []int{dns.RcodeBadVers}, nonAuthoritative: true, check: expectNoRecords},
+		{name: "EDNS on NXDOMAIN", qname: nameOfWireLength(zone, 254), qtype: dns.TypeA, edns: edns, rcodes: []int{dns.RcodeNameError}, authoritative: true, check: expectNameError(zoneSOA)},
+		{name: "EDNS on REFUSED", qname: unrelated, qtype: dns.TypeA, edns: edns, rcodes: []int{dns.RcodeRefused}, nonAuthoritative: true, check: expectNoRecords},
+	}
+	if set, ok := tg.txtSetAt(udpTXTLabel); ok {
+		cases = append(cases,
+			dnsCase{name: set.owner + " TXT over UDP without EDNS is truncated", qname: set.owner, qtype: dns.TypeTXT, truncated: true, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectPartOfRecordSet(set)},
+			dnsCase{name: set.owner + " TXT with EDNS 1232 is whole", qname: set.owner, qtype: dns.TypeTXT, edns: edns, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set)},
+		)
+	}
+	if set, ok := tg.txtSetAt(tcpTXTLabel); ok {
+		cases = append(cases,
+			dnsCase{name: set.owner + " TXT with EDNS 4096 is truncated at 1232", qname: set.owner, qtype: dns.TypeTXT, edns: ednsOPT{udpSize: 4096}, truncated: true, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectPartOfRecordSet(set)},
+			dnsCase{name: set.owner + " TXT over TCP is whole", qname: set.owner, qtype: dns.TypeTXT, tcp: true, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set)},
+			dnsCase{name: set.owner + " TXT over TCP with EDNS 512 is whole", qname: set.owner, qtype: dns.TypeTXT, tcp: true, edns: ednsOPT{udpSize: 512}, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set)},
+		)
+	}
 	return cases
 }
 
-// declaredRecordCases asks for every record set the target's zone file declares, as written and in mixed case, and asks each name for a type it has none of. A CNAME is also asked for types it is not, which it answers in their place.
+// checkTransportSets holds the TXT sets the zone file declares at the transport labels to the sizes their cases rely on. The smallest reply is the compressed one without an OPT record, the largest the uncompressed one with the OPT record of the reply: a server compresses only when a reply would not fit otherwise.
+func checkTransportSets(tg *target) error {
+	if set, ok := tg.txtSetAt(udpTXTLabel); ok {
+		smallest, err := replySize(set, true, false)
+		if err != nil {
+			return err
+		}
+		if smallest <= dns.MinMsgSize {
+			return fmt.Errorf("the TXT set at %s has a reply of %d octets without EDNS, want more than %d so that it is truncated", set.owner, smallest, dns.MinMsgSize)
+		}
+		largest, err := replySize(set, false, true)
+		if err != nil {
+			return err
+		}
+		if largest >= serverUDPSize {
+			return fmt.Errorf("the TXT set at %s has a reply of %d octets with EDNS, want less than %d so that it is whole", set.owner, largest, serverUDPSize)
+		}
+	}
+	if set, ok := tg.txtSetAt(tcpTXTLabel); ok {
+		smallest, err := replySize(set, true, true)
+		if err != nil {
+			return err
+		}
+		if smallest <= serverUDPSize {
+			return fmt.Errorf("the TXT set at %s has a reply of %d octets with EDNS, want more than %d so that it is truncated over UDP", set.owner, smallest, serverUDPSize)
+		}
+	}
+	return nil
+}
+
+// replySize packs the reply that carries the whole set, compressed or not, with or without the OPT record a name server adds, and returns its length in octets.
+func replySize(set targetRecordSet, compress, withOPT bool) (int, error) {
+	msg := new(dns.Msg)
+	msg.SetQuestion(set.owner, set.rrtype)
+	msg.Response = true
+	msg.Answer = set.records
+	if withOPT {
+		msg.SetEdns0(serverUDPSize, false)
+	}
+	msg.Compress = compress
+	packed, err := msg.Pack()
+	if err != nil {
+		return 0, fmt.Errorf("packing a reply with the %s set at %s: %w", dns.Type(set.rrtype), set.owner, err)
+	}
+	return len(packed), nil
+}
+
+// declaredRecordCases asks for every record set the target's zone file declares, as written and in mixed case, and asks each name for a type it has none of. A CNAME is also asked for types it is not, which it answers in their place. A set may be too large for a reply without EDNS, so the cases that expect one follow truncation.
 func declaredRecordCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 	noError := []int{dns.RcodeSuccess}
 	var cases []dnsCase
@@ -784,12 +1063,12 @@ func declaredRecordCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 	for _, set := range tg.recordSets {
 		label := set.owner + " " + dns.Type(set.rrtype).String()
 		cases = append(cases,
-			dnsCase{name: "declared " + label, qname: set.owner, qtype: set.rrtype, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set)},
-			dnsCase{name: "mixed case declared " + label, qname: alternateCase(set.owner), qtype: set.rrtype, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set)},
+			dnsCase{name: "declared " + label, qname: set.owner, qtype: set.rrtype, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set), checkTruncated: expectPartOfRecordSet(set)},
+			dnsCase{name: "mixed case declared " + label, qname: alternateCase(set.owner), qtype: set.rrtype, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set), checkTruncated: expectPartOfRecordSet(set)},
 		)
 		if set.rrtype == dns.TypeCNAME {
 			for _, qtype := range []uint16{dns.TypeA, dns.TypeNS} {
-				cases = append(cases, dnsCase{name: "declared " + label + " asked for " + dns.Type(qtype).String(), qname: set.owner, qtype: qtype, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set)})
+				cases = append(cases, dnsCase{name: "declared " + label + " asked for " + dns.Type(qtype).String(), qname: set.owner, qtype: qtype, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectRecordSet(set), checkTruncated: expectPartOfRecordSet(set)})
 			}
 		} else if !slices.Contains(ownersWithoutCNAME, set.owner) {
 			ownersWithoutCNAME = append(ownersWithoutCNAME, set.owner)
@@ -819,13 +1098,20 @@ func publicResolverCases(tg *target, label func() string) []dnsCase {
 	zone := tg.zone()
 	noError := []int{dns.RcodeSuccess}
 	want := netip.MustParseAddr("10.11.12.13")
-	return []dnsCase{
+	cases := []dnsCase{
 		{name: "dashed with random prefix", qname: label() + ".10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		{name: "dashed with random prefix in the label", qname: label() + "-10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		// The resolver minimises the query name on its way and passes through 13.<zone>, 12.13.<zone> and 11.12.13.<zone>, which used to answer NXDOMAIN.
 		{name: "dotted with random prefix", qname: label() + ".10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, check: expectNS(tg.nameServerHosts(), nil)},
 	}
+	// The resolver is asked over TCP so that its own limits on UDP cannot cut the set; whole sets show that it got them whole from a name server, over UDP with EDNS or over TCP after a truncated reply.
+	for _, txtLabel := range []string{udpTXTLabel, tcpTXTLabel} {
+		if set, ok := tg.txtSetAt(txtLabel); ok {
+			cases = append(cases, dnsCase{name: set.owner + " TXT over TCP is whole", qname: set.owner, qtype: dns.TypeTXT, tcp: true, rcodes: noError, fromZoneFile: true, check: expectCachedRecordSet(set)})
+		}
+	}
+	return cases
 }
 
 // outsideNames are two names outside the zone that every name server must refuse: an unrelated one, and a sibling that ends with the zone's name as a string but not at a label boundary, which only a label-by-label comparison refuses.
@@ -925,11 +1211,12 @@ func delegationChecks(t *testing.T, tg *target) {
 				silent := false
 				t.Run(d.cut, func(t *testing.T) {
 					referral := expectReferral(d)
+					partOfReferral := asCheck(func(resp *dns.Msg) error { return checkPartOfReferral(d, resp) })
 					cases := []dnsCase{
-						{name: "cut NS", qname: d.cut, qtype: dns.TypeNS, rcodes: noError, nonAuthoritative: true, check: referral},
-						{name: "random name A", qname: randomLabel(t) + "." + d.cut, qtype: dns.TypeA, rcodes: noError, nonAuthoritative: true, check: referral},
-						{name: "dashed A", qname: "10-11-12-13." + d.cut, qtype: dns.TypeA, rcodes: noError, nonAuthoritative: true, check: referral},
-						{name: "ACME challenge TXT", qname: "_acme-challenge." + d.cut, qtype: dns.TypeTXT, rcodes: noError, nonAuthoritative: true, check: referral},
+						{name: "cut NS", qname: d.cut, qtype: dns.TypeNS, rcodes: noError, nonAuthoritative: true, check: referral, checkTruncated: partOfReferral},
+						{name: "random name A", qname: randomLabel(t) + "." + d.cut, qtype: dns.TypeA, rcodes: noError, nonAuthoritative: true, check: referral, checkTruncated: partOfReferral},
+						{name: "dashed A", qname: "10-11-12-13." + d.cut, qtype: dns.TypeA, rcodes: noError, nonAuthoritative: true, check: referral, checkTruncated: partOfReferral},
+						{name: "ACME challenge TXT", qname: "_acme-challenge." + d.cut, qtype: dns.TypeTXT, rcodes: noError, nonAuthoritative: true, check: referral, checkTruncated: partOfReferral},
 						// DS records belong to the parent, so this server answers for them from its own zone.
 						{name: "cut DS", qname: d.cut, qtype: dns.TypeDS, rcodes: noError, authoritative: true, check: expectNoData(soa)},
 					}
@@ -978,6 +1265,46 @@ func expectReferral(d targetDelegation) func(*testing.T, *dns.Msg) {
 			}
 		}
 	}
+}
+
+// checkPartOfReferral checks a truncated referral to the delegation: no answer, and only records the whole referral carries, each at most once: NS records of the cut with its declared targets in the authority section and its declared glue in the additional section. At least one of them must be missing, since a server truncates only when the whole referral does not fit.
+func checkPartOfReferral(d targetDelegation, resp *dns.Msg) error {
+	if len(resp.Answer) != 0 {
+		return fmt.Errorf("answer section has %d records, want none in a referral to %s", len(resp.Answer), d.cut)
+	}
+	records, err := recordsOfType[*dns.NS](resp.Ns, d.cut, dns.TypeNS)
+	if err != nil {
+		return fmt.Errorf("authority section, want only NS records of %s: %w", d.cut, err)
+	}
+	remainingNS := slices.Clone(d.nameServers)
+	for _, record := range records {
+		i := slices.Index(remainingNS, strings.ToLower(record.Ns))
+		if i < 0 {
+			return fmt.Errorf("authority NS target %s is not one of the declared %v, or appears twice", record.Ns, d.nameServers)
+		}
+		remainingNS = slices.Delete(remainingNS, i, i+1)
+	}
+	type glueRecord struct {
+		nameServer string
+		addr       netip.Addr
+	}
+	var remainingGlue []glueRecord
+	for nameServer, addrs := range d.glue {
+		for _, addr := range addrs {
+			remainingGlue = append(remainingGlue, glueRecord{nameServer, addr})
+		}
+	}
+	for _, rr := range resp.Extra {
+		i := slices.IndexFunc(remainingGlue, func(g glueRecord) bool { return hasGlue([]dns.RR{rr}, g.nameServer, g.addr) })
+		if i < 0 {
+			return fmt.Errorf("additional record %q is not declared glue of %s, or appears twice", rr, d.cut)
+		}
+		remainingGlue = slices.Delete(remainingGlue, i, i+1)
+	}
+	if len(remainingNS) == 0 && len(remainingGlue) == 0 {
+		return fmt.Errorf("truncated referral to %s carries every NS and glue record, want some of them missing", d.cut)
+	}
+	return nil
 }
 
 // hasGlue reports whether extra holds the glue record for want: an A record for an IPv4 address
@@ -1330,6 +1657,369 @@ func TestCheckRecordSet(t *testing.T) {
 	}
 }
 
+func TestCheckCachedRecordSet(t *testing.T) {
+	set := testRecordSet(t, `example.test. 300 IN TXT "one"`, `example.test. 300 IN TXT "two"`)
+	tests := []struct {
+		name   string
+		answer []string
+		ok     bool
+	}{
+		{name: "accepts the declared TTL", answer: []string{`example.test. 300 IN TXT "one"`, `example.test. 300 IN TXT "two"`}, ok: true},
+		{name: "accepts a TTL counted down in a cache", answer: []string{`example.test. 17 IN TXT "two"`, `example.test. 17 IN TXT "one"`}, ok: true},
+		{name: "rejects a TTL above the declared one", answer: []string{`example.test. 301 IN TXT "one"`, `example.test. 301 IN TXT "two"`}},
+		{name: "rejects a missing record", answer: []string{`example.test. 300 IN TXT "one"`}},
+		{name: "rejects another record", answer: []string{`example.test. 300 IN TXT "one"`, `example.test. 300 IN TXT "three"`}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, "example.test.", dns.TypeTXT, dns.RcodeSuccess, tt.answer, nil, nil)
+			assertCheck(t, checkCachedRecordSet(set, resp), tt.ok)
+		})
+	}
+}
+
+func TestCheckPartOfRecordSet(t *testing.T) {
+	set := testRecordSet(t, `example.test. 300 IN TXT "one"`, `example.test. 300 IN TXT "two"`, `example.test. 300 IN TXT "three"`)
+	const one = `ExAmPlE.test. 300 IN TXT "one"`
+	const two = `ExAmPlE.test. 300 IN TXT "two"`
+	tests := []struct {
+		name       string
+		answer     []string
+		additional []string
+		ok         bool
+	}{
+		{name: "accepts some of the declared records", answer: []string{one, two}, ok: true},
+		{name: "accepts no record at all", ok: true},
+		{name: "rejects every declared record", answer: []string{one, two, `ExAmPlE.test. 300 IN TXT "three"`}},
+		{name: "rejects a record that is not declared", answer: []string{one, `ExAmPlE.test. 300 IN TXT "four"`}},
+		{name: "rejects a declared record twice", answer: []string{one, one}},
+		{name: "rejects a record with another TTL", answer: []string{one, `ExAmPlE.test. 299 IN TXT "two"`}},
+		{name: "rejects a record owned by another name", answer: []string{one, `www.example.test. 300 IN TXT "two"`}},
+		{name: "rejects a record in the additional section", answer: []string{one}, additional: []string{"ns1.example.test. 300 IN A 192.0.2.10"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, "ExAmPlE.test.", dns.TypeTXT, dns.RcodeSuccess, tt.answer, nil, tt.additional)
+			assertCheck(t, checkPartOfRecordSet(set, resp), tt.ok)
+		})
+	}
+}
+
+func TestCheckTruncation(t *testing.T) {
+	tests := []struct {
+		name      string
+		expected  bool
+		follow    bool
+		truncated bool
+		ok        bool
+	}{
+		{name: "accepts a whole reply where none is expected truncated", ok: true},
+		{name: "accepts a truncated reply where the query follows truncation", follow: true, truncated: true, ok: true},
+		{name: "accepts a whole reply where the query follows truncation", follow: true, ok: true},
+		{name: "accepts a truncated reply where one is expected", expected: true, truncated: true, ok: true},
+		{name: "rejects a truncated reply where a whole one is expected", truncated: true},
+		{name: "rejects a whole reply where a truncated one is expected", expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, "example.test.", dns.TypeTXT, dns.RcodeSuccess, nil, nil, nil)
+			resp.Truncated = tt.truncated
+			assertCheck(t, checkTruncation(dnsQuery{name: "example.test.", qtype: dns.TypeTXT, qclass: dns.ClassINET, truncated: tt.expected, followTruncation: tt.follow}, resp), tt.ok)
+		})
+	}
+}
+
+func TestCheckReplyOPT(t *testing.T) {
+	withEDNS := dnsQuery{name: "example.test.", qtype: dns.TypeSOA, qclass: dns.ClassINET, edns: ednsOPT{udpSize: 4096}}
+	withoutEDNS := dnsQuery{name: "example.test.", qtype: dns.TypeSOA, qclass: dns.ClassINET}
+	tests := []struct {
+		name   string
+		query  dnsQuery
+		rcode  int
+		mutate func(resp *dns.Msg)
+		ok     bool
+	}{
+		{name: "accepts the OPT record of the server", query: withEDNS, ok: true},
+		{name: "accepts the OPT record of the server on BADVERS", query: withEDNS, rcode: dns.RcodeBadVers, ok: true},
+		{name: "accepts no OPT record in reply to a query without one", query: withoutEDNS, mutate: func(resp *dns.Msg) { resp.Extra = nil }, ok: true},
+		{name: "rejects an OPT record in reply to a query without one", query: withoutEDNS},
+		{name: "rejects no OPT record in reply to a query with one", query: withEDNS, mutate: func(resp *dns.Msg) { resp.Extra = nil }},
+		{name: "rejects two OPT records", query: withEDNS, mutate: func(resp *dns.Msg) { resp.SetEdns0(serverUDPSize, false) }},
+		{name: "rejects the size of the query echoed", query: withEDNS, mutate: func(resp *dns.Msg) { resp.IsEdns0().SetUDPSize(4096) }},
+		{name: "rejects a size of 512", query: withEDNS, mutate: func(resp *dns.Msg) { resp.IsEdns0().SetUDPSize(512) }},
+		{name: "rejects version 1", query: withEDNS, mutate: func(resp *dns.Msg) { resp.IsEdns0().SetVersion(1) }},
+		{name: "rejects the DO flag set", query: withEDNS, mutate: func(resp *dns.Msg) { resp.IsEdns0().SetDo() }},
+		{name: "rejects an option", query: withEDNS, mutate: func(resp *dns.Msg) {
+			opt := resp.IsEdns0()
+			opt.Option = append(opt.Option, &dns.EDNS0_NSID{Code: dns.EDNS0NSID, Nsid: "6e73"})
+		}},
+		{name: "rejects an owner other than the root", query: withEDNS, mutate: func(resp *dns.Msg) { resp.IsEdns0().Hdr.Name = "example.test." }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, "example.test.", dns.TypeSOA, tt.rcode, nil, nil, nil)
+			resp.SetEdns0(serverUDPSize, false)
+			if tt.mutate != nil {
+				tt.mutate(resp)
+			}
+			packed, err := resp.Pack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire := new(dns.Msg)
+			if err := wire.Unpack(packed); err != nil {
+				t.Fatal(err)
+			}
+			if wire.Rcode != tt.rcode {
+				t.Fatalf("rcode after a wire round trip = %d, want %d", wire.Rcode, tt.rcode)
+			}
+			assertCheck(t, checkReplyOPT(tt.query, wire), tt.ok)
+		})
+	}
+}
+
+// startFakeDNS serves reply over UDP and TCP on one port of the loopback address and records the transport of every question it gets, in order. A nil reply closes the connection without replying.
+func startFakeDNS(t *testing.T, reply func(tcp bool, req *dns.Msg) *dns.Msg) (netip.AddrPort, func() []string) {
+	t.Helper()
+	var asked []string
+	var mu sync.Mutex
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		tcp := w.LocalAddr().Network() == "tcp"
+		mu.Lock()
+		asked = append(asked, w.LocalAddr().Network())
+		mu.Unlock()
+		resp := reply(tcp, req)
+		if resp == nil {
+			_ = w.Close()
+			return
+		}
+		resp.Id = req.Id
+		_ = w.WriteMsg(resp)
+	})
+
+	var conn net.PacketConn
+	var listener net.Listener
+	for range 20 {
+		var err error
+		conn, err = net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener, err = net.Listen("tcp", conn.LocalAddr().String())
+		if err == nil {
+			break
+		}
+		conn.Close()
+		conn = nil
+	}
+	if conn == nil {
+		t.Fatal("found no port free over both UDP and TCP")
+	}
+	for _, server := range []*dns.Server{{PacketConn: conn, Handler: handler}, {Listener: listener, Handler: handler}} {
+		started := make(chan struct{})
+		server.NotifyStartedFunc = func() { close(started) }
+		go func() { _ = server.ActivateAndServe() }()
+		<-started
+		t.Cleanup(func() { _ = server.Shutdown() })
+	}
+	return netip.MustParseAddrPort(conn.LocalAddr().String()), func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(asked)
+	}
+}
+
+func TestAskCaseFollowsTruncation(t *testing.T) {
+	const qname = "big.example.test."
+	set := testRecordSet(t, `big.example.test. 300 IN TXT "one"`, `big.example.test. 300 IN TXT "two"`, `big.example.test. 300 IN TXT "three"`)
+	replyWith := func(req *dns.Msg, truncated bool, records ...dns.RR) *dns.Msg {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Authoritative = true
+		resp.Truncated = truncated
+		resp.Answer = records
+		return resp
+	}
+	tc := dnsCase{name: "declared", qname: qname, qtype: dns.TypeTXT, rcodes: []int{dns.RcodeSuccess}, authoritative: true, check: expectRecordSet(set), checkTruncated: expectPartOfRecordSet(set)}
+	tests := []struct {
+		name          string
+		reply         func(tcp bool, req *dns.Msg) *dns.Msg
+		wantAsked     []string
+		wantTruncated bool
+		wantErr       bool
+		finalOK       bool
+	}{
+		{
+			name:      "accepts a reply that fits without asking over TCP",
+			reply:     func(_ bool, req *dns.Msg) *dns.Msg { return replyWith(req, false, set.records...) },
+			wantAsked: []string{"udp"},
+			finalOK:   true,
+		},
+		{
+			name: "accepts a truncated reply followed by the whole set over TCP",
+			reply: func(tcp bool, req *dns.Msg) *dns.Msg {
+				if tcp {
+					return replyWith(req, false, set.records...)
+				}
+				return replyWith(req, true, set.records[0])
+			},
+			wantAsked:     []string{"udp", "tcp"},
+			wantTruncated: true,
+			finalOK:       true,
+		},
+		{
+			name: "rejects a reply over TCP that still lacks a record",
+			reply: func(tcp bool, req *dns.Msg) *dns.Msg {
+				if tcp {
+					return replyWith(req, false, set.records[:2]...)
+				}
+				return replyWith(req, true, set.records[0])
+			},
+			wantAsked:     []string{"udp", "tcp"},
+			wantTruncated: true,
+		},
+		{
+			name:          "rejects a reply over TCP that is truncated again",
+			reply:         func(_ bool, req *dns.Msg) *dns.Msg { return replyWith(req, true, set.records[0]) },
+			wantAsked:     []string{"udp", "tcp"},
+			wantTruncated: true,
+			wantErr:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, asked := startFakeDNS(t, tt.reply)
+			resp, truncated, q, err := askCase(t, server, toNameServer, tc)
+			if got := asked(); !slices.Equal(got, tt.wantAsked) {
+				t.Errorf("questions over %v, want %v", got, tt.wantAsked)
+			}
+			if (truncated != nil) != tt.wantTruncated {
+				t.Fatalf("truncated reply = %v, want one: %t", truncated, tt.wantTruncated)
+			}
+			if truncated != nil {
+				assertCheck(t, checkPartOfRecordSet(set, withoutOPT(truncated)), true)
+			}
+			if q.tcp != (len(tt.wantAsked) == 2) {
+				t.Errorf("final query over TCP = %t, want %t", q.tcp, len(tt.wantAsked) == 2)
+			}
+			if tt.wantErr {
+				if err == nil {
+					t.Error("askCase accepted the reply over TCP, want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCheck(t, checkRecordSet(set, withoutOPT(resp)), tt.finalOK)
+		})
+	}
+}
+
+// shortenDNSRetryPauses keeps the number of attempts and makes the pauses between them negligible for the test.
+func shortenDNSRetryPauses(t *testing.T) {
+	saved := dnsRetryPauses
+	dnsRetryPauses = make([]time.Duration, len(saved))
+	for i := range dnsRetryPauses {
+		dnsRetryPauses[i] = time.Millisecond
+	}
+	t.Cleanup(func() { dnsRetryPauses = saved })
+}
+
+func TestExchangeRetriesATCPConnectionClosedWithoutAReply(t *testing.T) {
+	shortenDNSRetryPauses(t)
+	var mu sync.Mutex
+	connections := 0
+	server, asked := startFakeDNS(t, func(_ bool, req *dns.Msg) *dns.Msg {
+		mu.Lock()
+		defer mu.Unlock()
+		connections++
+		if connections == 1 {
+			return nil
+		}
+		resp := testReply(t, "10-11-12-13.example.test.", dns.TypeA, dns.RcodeSuccess, []string{"10-11-12-13.example.test. 300 IN A 10.11.12.13"}, nil, nil)
+		resp.RecursionDesired = req.RecursionDesired
+		return resp
+	})
+	tc := dnsCase{qname: "10-11-12-13.example.test.", qtype: dns.TypeA, tcp: true}
+	resp, err := exchangeAt(t, server, tc.query(toNameServer))
+	if err != nil {
+		t.Fatalf("exchangeAt failed: %v", err)
+	}
+	expectA(netip.MustParseAddr("10.11.12.13"))(t, resp)
+	if got, want := asked(), []string{"tcp", "tcp"}; !slices.Equal(got, want) {
+		t.Errorf("questions over %v, want %v", got, want)
+	}
+}
+
+func TestExchangeGivesUpWhenEveryTCPConnectionIsClosedWithoutAReply(t *testing.T) {
+	shortenDNSRetryPauses(t)
+	server, asked := startFakeDNS(t, func(bool, *dns.Msg) *dns.Msg { return nil })
+	tc := dnsCase{qname: "10-11-12-13.example.test.", qtype: dns.TypeA, tcp: true}
+	_, err := exchangeAt(t, server, tc.query(toNameServer))
+	if !errors.Is(err, errNoDNSResponse) {
+		t.Fatalf("exchangeAt error = %v, want %v", err, errNoDNSResponse)
+	}
+	if got, want := len(asked()), len(dnsRetryPauses)+1; got != want {
+		t.Errorf("%d TCP connections, want one per attempt, %d", got, want)
+	}
+}
+
+func TestCheckPartOfReferral(t *testing.T) {
+	d := targetDelegation{
+		cut:         "sub.example.test.",
+		nameServers: []string{"ns.other.test.", "ns1.sub.example.test."},
+		glue:        map[string][]netip.Addr{"ns1.sub.example.test.": {netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}},
+	}
+	const ns1 = "sub.example.test. 300 IN NS ns1.sub.example.test."
+	const nsOther = "SUB.example.test. 300 IN NS NS.OTHER.TEST."
+	const glueA = "ns1.sub.example.test. 300 IN A 192.0.2.1"
+	const glueAAAA = "ns1.sub.example.test. 300 IN AAAA 2001:db8::1"
+	tests := []struct {
+		name       string
+		answer     []string
+		authority  []string
+		additional []string
+		ok         bool
+	}{
+		{name: "accepts the NS records without glue", authority: []string{ns1, nsOther}, ok: true},
+		{name: "accepts the NS records with part of the glue", authority: []string{ns1, nsOther}, additional: []string{glueA}, ok: true},
+		{name: "accepts part of the NS records", authority: []string{ns1}, ok: true},
+		{name: "rejects the whole referral", authority: []string{ns1, nsOther}, additional: []string{glueA, glueAAAA}},
+		{name: "rejects an answer record", answer: []string{"www.sub.example.test. 300 IN A 192.0.2.80"}, authority: []string{ns1}},
+		{name: "rejects an NS target that is not declared", authority: []string{ns1, "sub.example.test. 300 IN NS ns.elsewhere.test."}},
+		{name: "rejects an NS record twice", authority: []string{ns1, ns1}},
+		{name: "rejects an NS record of another name", authority: []string{"example.test. 300 IN NS ns1.sub.example.test."}},
+		{name: "rejects glue that is not declared", authority: []string{ns1}, additional: []string{"ns1.sub.example.test. 300 IN A 192.0.2.2"}},
+		{name: "rejects glue twice", authority: []string{ns1}, additional: []string{glueA, glueA}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, "www.sub.example.test.", dns.TypeA, dns.RcodeSuccess, tt.answer, tt.authority, tt.additional)
+			resp.Authoritative = false
+			assertCheck(t, checkPartOfReferral(d, resp), tt.ok)
+		})
+	}
+}
+
+func TestWithoutOPT(t *testing.T) {
+	resp := testReply(t, "example.test.", dns.TypeSOA, dns.RcodeSuccess, nil, nil, []string{"ns1.example.test. 300 IN A 192.0.2.10"})
+	resp.SetEdns0(serverUDPSize, false)
+	content := withoutOPT(resp)
+	if len(content.Extra) != 1 || content.Extra[0].Header().Rrtype != dns.TypeA {
+		t.Errorf("additional section without OPT = %v, want the A record alone", content.Extra)
+	}
+	if resp.IsEdns0() == nil {
+		t.Error("withoutOPT removed the OPT record from the reply it was given")
+	}
+}
+
 func TestCheckRecordSetComparesEveryField(t *testing.T) {
 	tests := []struct {
 		rrtype    uint16
@@ -1502,6 +2192,14 @@ func TestDNSCaseQuery(t *testing.T) {
 	tc.qclass = dns.ClassCHAOS
 	if got, want := tc.query(throughResolver), (dnsQuery{name: "example.test.", qtype: dns.TypeSOA, qclass: dns.ClassCHAOS, recursion: true, checkingDisabled: true}); got != want {
 		t.Errorf("query through a resolver = %+v, want %+v", got, want)
+	}
+	tc = dnsCase{qname: "example.test.", qtype: dns.TypeTXT, tcp: true, edns: ednsOPT{udpSize: 512, version: 1}, truncated: true}
+	if got, want := tc.query(toNameServer), (dnsQuery{name: "example.test.", qtype: dns.TypeTXT, qclass: dns.ClassINET, tcp: true, edns: ednsOPT{udpSize: 512, version: 1}, truncated: true}); got != want {
+		t.Errorf("query with transport and EDNS = %+v, want %+v", got, want)
+	}
+	tc = dnsCase{qname: "example.test.", qtype: dns.TypeTXT, checkTruncated: expectNoRecords}
+	if got, want := tc.query(toNameServer), (dnsQuery{name: "example.test.", qtype: dns.TypeTXT, qclass: dns.ClassINET, followTruncation: true}); got != want {
+		t.Errorf("query of a case that checks a truncated reply = %+v, want %+v", got, want)
 	}
 }
 

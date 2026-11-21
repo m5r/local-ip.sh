@@ -86,16 +86,16 @@ func TestConfigStaging(t *testing.T) {
 func TestConfigDefaultAddresses(t *testing.T) {
 	for _, test := range []struct {
 		flyAppName string
-		dns        string
+		dnsUDP     string
 	}{
-		{flyAppName: "", dns: ":53"},
-		{flyAppName: "local-ip-staging", dns: "fly-global-services:53"},
+		{flyAppName: "", dnsUDP: ":53"},
+		{flyAppName: "local-ip-staging", dnsUDP: "fly-global-services:53"},
 	} {
 		t.Run("FLY_APP_NAME="+test.flyAppName, func(t *testing.T) {
 			setUp(t, map[string]string{"FLY_APP_NAME": test.flyAppName})
 			cfg := mustConfig(t)
-			if cfg.DNSAddress != test.dns || cfg.HTTPAddress != ":80" || cfg.HTTPSAddress != ":443" {
-				t.Errorf("addresses are %q, %q and %q, want %q, \":80\" and \":443\"", cfg.DNSAddress, cfg.HTTPAddress, cfg.HTTPSAddress, test.dns)
+			if cfg.DNSUDPAddress != test.dnsUDP || cfg.DNSTCPAddress != ":53" || cfg.HTTPAddress != ":80" || cfg.HTTPSAddress != ":443" {
+				t.Errorf("addresses are %q, %q, %q and %q, want %q, \":53\", \":80\" and \":443\"", cfg.DNSUDPAddress, cfg.DNSTCPAddress, cfg.HTTPAddress, cfg.HTTPSAddress, test.dnsUDP)
 			}
 		})
 	}
@@ -121,8 +121,9 @@ func TestConfigPorts(t *testing.T) {
 
 	t.Run("zero", func(t *testing.T) {
 		setUp(t, map[string]string{"XIP_DNS_PORT": "0"})
-		if got := mustConfig(t).DNSAddress; got != ":0" {
-			t.Errorf("DNSAddress is %q, want \":0\"", got)
+		cfg := mustConfig(t)
+		if cfg.DNSUDPAddress != ":0" || cfg.DNSTCPAddress != ":0" {
+			t.Errorf("DNS addresses are %q and %q, want \":0\" for both", cfg.DNSUDPAddress, cfg.DNSTCPAddress)
 		}
 	})
 
@@ -174,7 +175,7 @@ func checkPortRefused(t *testing.T, env, flag, value string) {
 	t.Helper()
 	cfg, err := config()
 	if err == nil {
-		t.Fatalf("config accepted %q for %s / %s: addresses %q, %q and %q", value, flag, env, cfg.DNSAddress, cfg.HTTPAddress, cfg.HTTPSAddress)
+		t.Fatalf("config accepted %q for %s / %s: addresses %q, %q, %q and %q", value, flag, env, cfg.DNSUDPAddress, cfg.DNSTCPAddress, cfg.HTTPAddress, cfg.HTTPSAddress)
 	}
 	if !strings.Contains(err.Error(), env) || !strings.Contains(err.Error(), flag) || !strings.Contains(err.Error(), `"`+value+`"`) {
 		t.Errorf("the error %q does not name %s / %s and quote the value", err, flag, env)

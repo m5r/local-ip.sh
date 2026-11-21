@@ -319,7 +319,7 @@ func TestServeTXTAnswers(t *testing.T) {
 	}
 }
 
-// serveUDP stands for the server under test, which listens on UDP only.
+// serveUDP stands for the server under test, which the forwarder asks over UDP.
 func serveUDP(t *testing.T, lookup func(name string) []string) string {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")

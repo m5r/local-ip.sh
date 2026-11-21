@@ -79,15 +79,19 @@ func questionSectionLength(t *testing.T, request *dns.Msg) int {
 	return len(packed) - headerLength
 }
 
-// checkReply compares a reply with what the row wants: RCODE, the flags, the three sections and the size. qname replaces {q} in the expected records.
+// checkReply compares a reply that came over UDP, or from the handler with a UDP address, with what the row wants: RCODE, the flags, the three sections and the size. qname replaces {q} in the expected records.
 func checkReply(t *testing.T, reply []byte, request *dns.Msg, want answerWant, qname string) *dns.Msg {
 	t.Helper()
 	resp := new(dns.Msg)
 	if err := resp.Unpack(reply); err != nil {
 		t.Fatalf("unpacking the reply: %v", err)
 	}
-	if len(reply) > maxResponseSize {
-		t.Errorf("the reply takes %d octets, more than %d", len(reply), maxResponseSize)
+	size := uint16(0)
+	if opt := request.IsEdns0(); opt != nil {
+		size = opt.UDPSize()
+	}
+	if limit := limitFor("udp", size); len(reply) > limit {
+		t.Errorf("the reply takes %d octets, more than the limit of %d over UDP", len(reply), limit)
 	}
 	if !resp.Response || resp.Id != request.Id || resp.Opcode != request.Opcode {
 		t.Errorf("not a reply to the request: QR %v, id %d (sent %d), opcode %d (sent %d)", resp.Response, resp.Id, request.Id, resp.Opcode, request.Opcode)
@@ -423,7 +427,7 @@ func TestConcurrentAnswersKeepStoredRecords(t *testing.T) {
 	}
 }
 
-// challengeAnswerSizeOf packs the TXT answer at the challenge name of example.test independently of AddChallenge: the name in upper case as the question, one record per value.
+// challengeAnswerSizeOf packs the TXT answer at the challenge name of example.test independently of AddChallenge: the name in upper case as the question, one record per value, each cut into strings of 255 octets.
 func challengeAnswerSizeOf(t *testing.T, values []string) int {
 	t.Helper()
 	qname := strings.ToUpper(challengeLabel + exampleApex)
@@ -431,7 +435,11 @@ func challengeAnswerSizeOf(t *testing.T, values []string) int {
 	msg.SetQuestion(qname, dns.TypeTXT)
 	msg.Compress = true
 	for _, value := range values {
-		msg.Answer = append(msg.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET}, Txt: []string{value}})
+		var txt []string
+		for len(value) > 255 {
+			txt, value = append(txt, value[:255]), value[255:]
+		}
+		msg.Answer = append(msg.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET}, Txt: append(txt, value)})
 	}
 	packed, err := msg.Pack()
 	if err != nil {
@@ -448,84 +456,34 @@ func challengeValue(i int) string {
 func TestAddChallengeBound(t *testing.T) {
 	xip, address := startExampleServer(t, exampleZoneFile)
 	name := challengeLabel + exampleApex
-
-	var accepted []string
-	var refusal error
-	for i := 0; refusal == nil; i++ {
-		if i > 100 {
-			t.Fatal("AddChallenge accepted more than 100 values")
-		}
-		if refusal = xip.AddChallenge(name, challengeValue(i)); refusal == nil {
-			accepted = append(accepted, challengeValue(i))
-		}
+	published := challengeValue(0)
+	if err := xip.AddChallenge(name, published); err != nil {
+		t.Fatal(err)
 	}
 
-	t.Run("values are accepted until the next one would exceed the limit", func(t *testing.T) {
-		if size := challengeAnswerSizeOf(t, accepted); size > maxResponseSize {
-			t.Errorf("the accepted values make an answer of %d octets", size)
-		}
-		if size := challengeAnswerSizeOf(t, append(slices.Clone(accepted), challengeValue(len(accepted)))); size <= maxResponseSize {
-			t.Errorf("the refused value would make an answer of only %d octets", size)
-		}
-	})
-
-	t.Run("the refusal names the size", func(t *testing.T) {
-		size := challengeAnswerSizeOf(t, append(slices.Clone(accepted), challengeValue(len(accepted))))
-		want := fmt.Sprintf("xip: publishing this value at %s would make the TXT answer %d octets, more than the limit of 512 octets for a UDP response", name, size)
-		if refusal.Error() != want {
-			t.Errorf("AddChallenge error = %q, want %q", refusal, want)
-		}
-	})
-
-	wantAnswer := make([]string, len(accepted))
-	for i, value := range accepted {
-		wantAnswer[i] = fmt.Sprintf("{q} 0 IN TXT %q", value)
+	oversized := strings.Repeat("o", 65200)
+	size := challengeAnswerSizeOf(t, []string{published, oversized})
+	if size <= maxReplyWithoutOPT {
+		t.Fatalf("the values make an answer of %d octets, which fits in a DNS message with an OPT record: choose a longer value", size)
 	}
-	t.Run("the published set is unchanged and its answer fits", func(t *testing.T) {
-		exchangeAndCheck(t, address, ask(name, dns.TypeTXT), positive(wantAnswer...))
-		exchangeAndCheck(t, address, ask(strings.ToUpper(name), dns.TypeTXT), positive(wantAnswer...))
-	})
-
-	t.Run("a value already published is accepted again", func(t *testing.T) {
-		if err := xip.AddChallenge(name, accepted[0]); err != nil {
-			t.Errorf("AddChallenge of a published value: %v", err)
-		}
-		exchangeAndCheck(t, address, ask(name, dns.TypeTXT), positive(wantAnswer...))
-	})
-}
-
-func TestAddChallengeBoundAtTheLimit(t *testing.T) {
-	name := challengeLabel + exampleApex
-	long := strings.Repeat("a", 255)
-	fitting, overflowing := strings.Repeat("b", 185), strings.Repeat("b", 186)
-	if size := challengeAnswerSizeOf(t, []string{long, fitting}); size != maxResponseSize {
-		t.Fatalf("values of 255 and 185 octets make an answer of %d octets, want %d: choose other lengths", size, maxResponseSize)
-	}
-	if size := challengeAnswerSizeOf(t, []string{long, overflowing}); size != maxResponseSize+1 {
-		t.Fatalf("values of 255 and 186 octets make an answer of %d octets, want %d: choose other lengths", size, maxResponseSize+1)
-	}
-
-	t.Run("values whose TXT answer takes exactly 512 octets are accepted", func(t *testing.T) {
-		xip, address := startExampleServer(t, exampleZoneFile)
-		for _, value := range []string{long, fitting} {
-			if err := xip.AddChallenge(name, value); err != nil {
-				t.Fatalf("AddChallenge of a value of %d octets: %v", len(value), err)
-			}
-		}
-		exchangeAndCheck(t, address, ask(strings.ToUpper(name), dns.TypeTXT), positive(fmt.Sprintf("{q} 0 IN TXT %q", long), fmt.Sprintf("{q} 0 IN TXT %q", fitting)))
-	})
-
-	t.Run("a value one octet longer, making 513 octets, is refused and leaves the set unchanged", func(t *testing.T) {
-		xip, address := startExampleServer(t, exampleZoneFile)
-		if err := xip.AddChallenge(name, long); err != nil {
-			t.Fatalf("AddChallenge of a value of 255 octets: %v", err)
-		}
-		err := xip.AddChallenge(name, overflowing)
-		want := fmt.Sprintf("xip: publishing this value at %s would make the TXT answer 513 octets, more than the limit of 512 octets for a UDP response", name)
+	t.Run("a value that would make the answer too large for a DNS message is refused with its size", func(t *testing.T) {
+		err := xip.AddChallenge(name, oversized)
+		want := fmt.Sprintf("xip: publishing this value at %s would make the TXT answer %d octets, more than the limit of 65524 octets for a DNS message", name, size)
 		if err == nil || err.Error() != want {
 			t.Errorf("AddChallenge error = %v, want %q", err, want)
 		}
-		exchangeAndCheck(t, address, ask(name, dns.TypeTXT), positive(fmt.Sprintf("{q} 0 IN TXT %q", long)))
+	})
+
+	wantAnswer := fmt.Sprintf("{q} 0 IN TXT %q", published)
+	t.Run("the published set is unchanged", func(t *testing.T) {
+		exchangeAndCheck(t, address, ask(name, dns.TypeTXT), positive(wantAnswer))
+	})
+
+	t.Run("a value already published is accepted again", func(t *testing.T) {
+		if err := xip.AddChallenge(name, published); err != nil {
+			t.Errorf("AddChallenge of a published value: %v", err)
+		}
+		exchangeAndCheck(t, address, ask(name, dns.TypeTXT), positive(wantAnswer))
 	})
 }
 
@@ -533,16 +491,19 @@ func TestAddChallengeBoundConcurrent(t *testing.T) {
 	xip, address := startExampleServer(t, exampleZoneFile)
 	name := challengeLabel + exampleApex
 	const goroutines = 16
-	// Every value has the same length, so any set of n values makes an answer of the same size.
+	// Every value has the same length, so any set of n values makes an answer of the same size; at this length a handful fit in a DNS message.
+	value := func(i int) string {
+		return fmt.Sprintf("value-%02d-", i) + strings.Repeat("v", 9991)
+	}
 	firstValues := func(n int) []string {
 		values := make([]string, n)
 		for i := range values {
-			values[i] = challengeValue(i)
+			values[i] = value(i)
 		}
 		return values
 	}
 	fitting := 0
-	for fitting < goroutines && challengeAnswerSizeOf(t, firstValues(fitting+1)) <= maxResponseSize {
+	for fitting < goroutines && challengeAnswerSizeOf(t, firstValues(fitting+1)) <= maxReplyWithoutOPT {
 		fitting++
 	}
 	if fitting == goroutines {
@@ -554,7 +515,7 @@ func TestAddChallengeBoundConcurrent(t *testing.T) {
 	succeeded := 0
 	for i := range goroutines {
 		wg.Go(func() {
-			if err := xip.AddChallenge(name, challengeValue(i)); err == nil {
+			if err := xip.AddChallenge(name, value(i)); err == nil {
 				mu.Lock()
 				succeeded++
 				mu.Unlock()
@@ -564,17 +525,10 @@ func TestAddChallengeBoundConcurrent(t *testing.T) {
 	wg.Wait()
 
 	request := ask(strings.ToUpper(name), dns.TypeTXT)
-	packet, err := request.Pack()
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply := exchangeRaw(t, address, packet)
-	if len(reply) > maxResponseSize {
-		t.Errorf("the TXT answer takes %d octets, more than %d", len(reply), maxResponseSize)
-	}
-	resp := new(dns.Msg)
-	if err := resp.Unpack(reply); err != nil {
-		t.Fatal(err)
+	request.SetEdns0(1232, false)
+	resp := exchangeOver(t, "tcp", address, request)
+	if resp.Truncated {
+		t.Error("the TXT answer is truncated over TCP")
 	}
 	if len(resp.Answer) != succeeded {
 		t.Errorf("%d values are served, but %d calls succeeded", len(resp.Answer), succeeded)

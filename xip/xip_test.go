@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func TestResolveDashE2E(t *testing.T) {
 	}
 }
 
-// startTestServer serves a new instance on an ephemeral loopback UDP port and returns its address.
+// startTestServer serves a new instance on an ephemeral loopback port, over UDP and TCP, and returns its address.
 func startTestServer(t *testing.T, opts ...Option) string {
 	t.Helper()
 	xip, err := NewXip(opts...)
@@ -57,18 +58,34 @@ func startTestServer(t *testing.T, opts ...Option) string {
 	return serveTestXip(t, xip)
 }
 
-// serveTestXip serves xip on an ephemeral loopback UDP port until the test ends, then checks that Serve returned nil.
+// listenTestTransports binds a UDP socket and a TCP listener on the same ephemeral loopback port, the way the server is reached in production.
+func listenTestTransports(t *testing.T) (net.PacketConn, net.Listener) {
+	t.Helper()
+	// A port free for UDP can be taken for TCP by another process, so a few ports are tried.
+	for range 20 {
+		conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("binding a loopback UDP socket: %v", err)
+		}
+		listener, err := net.Listen("tcp", conn.LocalAddr().String())
+		if err == nil {
+			return conn, listener
+		}
+		conn.Close()
+	}
+	t.Fatal("found no loopback port free for both UDP and TCP in 20 attempts")
+	return nil, nil
+}
+
+// serveTestXip serves xip on an ephemeral loopback port, over UDP and TCP, until the test ends, then checks that Serve returned nil.
 func serveTestXip(t *testing.T, xip *Xip) string {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("binding a loopback UDP socket: %v", err)
-	}
+	conn, listener := listenTestTransports(t)
 	address := conn.LocalAddr().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- xip.Serve(ctx, conn) }()
+	go func() { served <- xip.Serve(ctx, conn, listener) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -132,29 +149,34 @@ func TestInstanceIsolation(t *testing.T) {
 	}
 }
 
-func TestServeStopsOnCancel(t *testing.T) {
-	xip, err := NewXip(
-		WithDomain("serve-cancel.test"),
-		WithEmail("admin@serve-cancel.test"),
+func newServeTestXip(t *testing.T, domain string, opts ...Option) *Xip {
+	t.Helper()
+	xip, err := NewXip(append([]Option{
+		WithDomain(domain),
+		WithEmail("admin@" + domain),
 		WithNameServers([]string{"192.0.2.10"}),
-	)
+	}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	return xip
+}
+
+func TestServeStopsOnCancel(t *testing.T) {
+	xip := newServeTestXip(t, "serve-cancel.test")
+	conn, listener := listenTestTransports(t)
 	address := conn.LocalAddr().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan error, 1)
-	go func() { served <- xip.Serve(ctx, conn) }()
+	go func() { served <- xip.Serve(ctx, conn, listener) }()
 
-	resp := queryTestServer(t, address, "ns1.serve-cancel.test.", dns.TypeA)
-	if len(resp.Answer) != 1 {
-		t.Fatalf("got %d answers before cancellation, want 1:\n%s", len(resp.Answer), resp)
+	for _, network := range []string{"udp", "tcp"} {
+		resp := exchangeOver(t, network, address, ask("ns1.serve-cancel.test.", dns.TypeA))
+		if len(resp.Answer) != 1 {
+			t.Fatalf("got %d answers over %s before cancellation, want 1:\n%s", len(resp.Answer), network, resp)
+		}
 	}
 
 	cancel()
@@ -169,29 +191,41 @@ func TestServeStopsOnCancel(t *testing.T) {
 
 	rebound, err := net.ListenPacket("udp", address)
 	if err != nil {
-		t.Fatalf("binding %s again after Serve returned: %v", address, err)
+		t.Fatalf("binding %s over UDP again after Serve returned: %v", address, err)
 	}
 	if err := rebound.Close(); err != nil {
 		t.Error(err)
 	}
+	relistened, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("listening on %s over TCP again after Serve returned: %v", address, err)
+	}
+	if err := relistened.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestServeRequiresBothTransports(t *testing.T) {
+	xip := newServeTestXip(t, "serve-both.test")
+	conn, listener := listenTestTransports(t)
+	address := conn.LocalAddr().String()
+	listener.Close()
+	if err := xip.Serve(t.Context(), conn, nil); err == nil {
+		t.Fatal("Serve without a TCP listener returned nil, want an error")
+	}
+	rebound, err := net.ListenPacket("udp", address)
+	if err != nil {
+		t.Fatalf("the UDP socket is still bound after Serve refused to start: %v", err)
+	}
+	rebound.Close()
 }
 
 func TestServeReportsReadLoopError(t *testing.T) {
-	xip, err := NewXip(
-		WithDomain("serve-error.test"),
-		WithEmail("admin@serve-error.test"),
-		WithNameServers([]string{"192.0.2.10"}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	xip := newServeTestXip(t, "serve-error.test")
+	conn, listener := listenTestTransports(t)
 
 	served := make(chan error, 1)
-	go func() { served <- xip.Serve(t.Context(), conn) }()
+	go func() { served <- xip.Serve(t.Context(), conn, listener) }()
 
 	// An answered query proves the read loop is running, so the close below hits the loop and not the start.
 	queryTestServer(t, conn.LocalAddr().String(), "ns1.serve-error.test.", dns.TypeA)
@@ -201,8 +235,8 @@ func TestServeReportsReadLoopError(t *testing.T) {
 
 	select {
 	case err := <-served:
-		if err == nil {
-			t.Fatal("Serve returned nil after its socket was closed from outside, want an error")
+		if err == nil || !strings.Contains(err.Error(), "over UDP") {
+			t.Fatalf("Serve returned %v after its socket was closed from outside, want an error naming UDP", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Serve did not return within 10 seconds of its socket being closed")

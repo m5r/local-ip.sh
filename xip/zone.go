@@ -81,7 +81,7 @@ func newZone(domain, email string, nameServers []netip.Addr, file *zoneFile) (*z
 		}
 	}
 
-	if err := z.checkResponseSizes(domain, email); err != nil {
+	if err := z.checkResponseSizes(); err != nil {
 		return nil, err
 	}
 	return z, nil
@@ -110,16 +110,8 @@ func (z *zone) add(rr dns.RR) {
 	sets[rr.Header().Rrtype] = append(sets[rr.Header().Rrtype], rr)
 }
 
-// checkResponseSizes refuses a configuration whose negative answer or built-in answers would not fit in a response (B7); every other reply is bounded by construction or by the zone file's own checks.
-func (z *zone) checkResponseSizes(domain, email string) error {
-	size, err := z.largestNegativeSize()
-	if err != nil {
-		return fmt.Errorf("xip: building the negative answer: %w", err)
-	}
-	if size > maxResponseSize {
-		return fmt.Errorf("xip: the domain %s and the email address %s make a negative answer of %d octets, more than the limit of %d octets for a UDP response", domain, email, size, maxResponseSize)
-	}
-
+// checkResponseSizes refuses a configuration whose built-in answers at the apex, which grow with the list of name servers, would not fit in a DNS message (B7); every other reply is bounded by construction or by the zone file's own checks.
+func (z *zone) checkResponseSizes() error {
 	qname := upperASCII(z.apex)
 	nsSize, err := responseSize(qname, dns.TypeNS, ownedBy(qname, z.records[z.apex][dns.TypeNS]), nil, z.nameServerAddresses())
 	if err := z.checkBuiltInAnswer(dns.TypeNS, nsSize, err); err != nil {
@@ -134,21 +126,12 @@ func (z *zone) checkResponseSizes(domain, email string) error {
 	return nil
 }
 
-// largestNegativeSize packs the negative answer to the longest name of the zone, asked in upper case so that no suffix with a letter compresses against a stored name.
-func (z *zone) largestNegativeSize() (int, error) {
-	probe, err := referralProbeName(z.apex)
-	if err != nil {
-		return 0, err
-	}
-	return responseSize(probe, dns.TypeA, nil, z.negativeAuthority(z.negativeTTL()), nil)
-}
-
 func (z *zone) checkBuiltInAnswer(rrtype uint16, size int, err error) error {
 	if err != nil {
 		return fmt.Errorf("xip: building the answer for %s %s: %w", z.apex, dns.Type(rrtype), err)
 	}
 	if size > maxResponseSize {
-		return fmt.Errorf("xip: the answer for %s %s takes %d octets, more than the limit of %d octets for a UDP response; there are too many name servers for this domain", z.apex, dns.Type(rrtype), size, maxResponseSize)
+		return fmt.Errorf("xip: the answer for %s %s takes %d octets, more than the limit of %d octets for a DNS message; there are too many name servers for this domain", z.apex, dns.Type(rrtype), size, maxResponseSize)
 	}
 	return nil
 }

@@ -476,20 +476,6 @@ func TestSOARecordFields(t *testing.T) {
 	}
 }
 
-// negativeAnswerSizeOf packs the negative answer independently of newZone: the longest name of the zone in upper case, type A, and the SOA record in the authority section.
-func negativeAnswerSizeOf(t *testing.T, apex, rname string) int {
-	t.Helper()
-	msg := new(dns.Msg)
-	msg.SetQuestion(strings.ToUpper(nameOfWireLength(t, maxNameWireLength, apex)), dns.TypeA)
-	msg.Ns = []dns.RR{mustRR(t, fmt.Sprintf("%s 300 IN SOA ns1.%s %s 2024072600 900 900 1800 300", apex, apex, rname))}
-	msg.Compress = true
-	packed, err := msg.Pack()
-	if err != nil {
-		t.Fatalf("packing the negative answer: %v", err)
-	}
-	return len(packed)
-}
-
 // nameServerAnswerSizeOf packs the NS answer at apex independently of newZone: the apex in upper case as the question, n NS records and their addresses.
 func nameServerAnswerSizeOf(t *testing.T, apex string, n int) int {
 	t.Helper()
@@ -497,9 +483,10 @@ func nameServerAnswerSizeOf(t *testing.T, apex string, n int) int {
 	msg := new(dns.Msg)
 	msg.SetQuestion(qname, dns.TypeNS)
 	msg.Compress = true
+	addresses := addressesUpTo(n)
 	for i := range n {
 		msg.Answer = append(msg.Answer, mustRR(t, fmt.Sprintf("%s 300 IN NS ns%d.%s", qname, i+1, apex)))
-		msg.Extra = append(msg.Extra, mustRR(t, fmt.Sprintf("ns%d.%s 300 IN A 192.0.2.%d", i+1, apex, i+1)))
+		msg.Extra = append(msg.Extra, mustRR(t, fmt.Sprintf("ns%d.%s 300 IN A %s", i+1, apex, addresses[i])))
 	}
 	packed, err := msg.Pack()
 	if err != nil {
@@ -508,45 +495,17 @@ func nameServerAnswerSizeOf(t *testing.T, apex string, n int) int {
 	return len(packed)
 }
 
-// nameServerSetupOfSize finds a domain below example.test and a number of name servers whose NS answer takes exactly size octets.
-// Below ten name servers every NS answer has an even length, so an odd size needs two-digit labels, and searching keeps the test independent of the arithmetic.
-func nameServerSetupOfSize(t *testing.T, size int) (domain string, count int) {
-	t.Helper()
-	for count := 1; count <= 20; count++ {
-		for octets := wireLengthOf(t, exampleApex) + 2; octets <= 120; octets++ {
-			domain := domainOfWireLength(t, octets)
-			if nameServerAnswerSizeOf(t, domain+".", count) == size {
-				return domain, count
-			}
-		}
-	}
-	t.Fatalf("no domain and number of name servers make an NS answer of %d octets", size)
-	return "", 0
-}
-
+// addressesUpTo returns n different name server addresses.
 func addressesUpTo(n int) []netip.Addr {
 	addresses := make([]netip.Addr, n)
 	for i := range addresses {
-		addresses[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)})
+		addresses[i] = netip.AddrFrom4([4]byte{10, 0, byte((i + 1) >> 8), byte(i + 1)})
 	}
 	return addresses
 }
 
-// domainOfWireLength is a domain under example.test whose apex is octets long in wire format.
-func domainOfWireLength(t *testing.T, octets int) string {
-	return strings.TrimSuffix(nameOfWireLength(t, octets, exampleApex), ".")
-}
-
-// largestDomainLength is the longest apex in wire format whose negative answer fits, for the email address admin@example.test.
-func largestDomainLength(t *testing.T) int {
-	t.Helper()
-	// No label fits in a single octet, so the shortest apex below example.test is two octets longer.
-	for octets := wireLengthOf(t, exampleApex) + 2; ; octets++ {
-		if negativeAnswerSizeOf(t, domainOfWireLength(t, octets+1)+".", "admin.example.test.") > maxResponseSize {
-			return octets
-		}
-	}
-}
+// oversizedNameServerList is a number of name servers whose NS answer at example.test does not fit in a DNS message.
+const oversizedNameServerList = 2000
 
 func TestNewZoneRefusals(t *testing.T) {
 	one := addressesUpTo(1)
@@ -580,54 +539,15 @@ func TestNewZoneRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("the longest domain whose negative answer fits is accepted", func(t *testing.T) {
-		if _, err := newZone(domainOfWireLength(t, largestDomainLength(t)), exampleEmail, one, nil); err != nil {
-			t.Errorf("newZone: %v", err)
+	t.Run("name servers whose NS answer does not fit in a DNS message are refused", func(t *testing.T) {
+		size := nameServerAnswerSizeOf(t, exampleApex, oversizedNameServerList)
+		if size <= maxReplyWithoutOPT {
+			t.Fatalf("%d name servers make an NS answer of %d octets, which fits: choose more", oversizedNameServerList, size)
 		}
-	})
-
-	t.Run("a domain one octet longer makes the negative answer too large", func(t *testing.T) {
-		domain := domainOfWireLength(t, largestDomainLength(t)+1)
-		size := negativeAnswerSizeOf(t, domain+".", "admin.example.test.")
-		_, err := newZone(domain, exampleEmail, one, nil)
-		want := fmt.Sprintf("xip: the domain %s and the email address %s make a negative answer of %d octets, more than the limit of 512 octets for a UDP response", domain, exampleEmail, size)
+		_, err := newZone(exampleDomain, exampleEmail, addressesUpTo(oversizedNameServerList), nil)
+		want := fmt.Sprintf("xip: the answer for example.test. NS takes %d octets, more than the limit of 65524 octets for a DNS message; there are too many name servers for this domain", size)
 		if err == nil || err.Error() != want {
 			t.Errorf("newZone error = %v, want %q", err, want)
-		}
-	})
-
-	fitting := 1
-	for nameServerAnswerSizeOf(t, exampleApex, fitting+1) <= maxResponseSize {
-		fitting++
-	}
-
-	t.Run("the largest number of name servers whose NS answer fits is accepted", func(t *testing.T) {
-		if _, err := newZone(exampleDomain, exampleEmail, addressesUpTo(fitting), nil); err != nil {
-			t.Errorf("newZone with %d name servers: %v", fitting, err)
-		}
-	})
-
-	t.Run("one name server more makes the NS answer too large", func(t *testing.T) {
-		_, err := newZone(exampleDomain, exampleEmail, addressesUpTo(fitting+1), nil)
-		want := fmt.Sprintf("xip: the answer for example.test. NS takes %d octets, more than the limit of 512 octets for a UDP response; there are too many name servers for this domain", nameServerAnswerSizeOf(t, exampleApex, fitting+1))
-		if err == nil || err.Error() != want {
-			t.Errorf("newZone error = %v, want %q", err, want)
-		}
-	})
-
-	t.Run("an NS answer of exactly 512 octets is accepted", func(t *testing.T) {
-		domain, count := nameServerSetupOfSize(t, maxResponseSize)
-		if _, err := newZone(domain, exampleEmail, addressesUpTo(count), nil); err != nil {
-			t.Errorf("newZone with %d name servers under an apex of %d octets: %v", count, wireLengthOf(t, domain+"."), err)
-		}
-	})
-
-	t.Run("an NS answer of 513 octets is refused", func(t *testing.T) {
-		domain, count := nameServerSetupOfSize(t, maxResponseSize+1)
-		_, err := newZone(domain, exampleEmail, addressesUpTo(count), nil)
-		want := fmt.Sprintf("xip: the answer for %s. NS takes 513 octets, more than the limit of 512 octets for a UDP response; there are too many name servers for this domain", domain)
-		if err == nil || err.Error() != want {
-			t.Errorf("newZone with %d name servers under an apex of %d octets: error = %v, want %q", count, wireLengthOf(t, domain+"."), err, want)
 		}
 	})
 }
@@ -639,13 +559,8 @@ func TestNewXipStopsOnTheRefusalsOfB7(t *testing.T) {
 	if rnameErr == nil {
 		t.Fatal("a local part of 64 octets makes a valid RNAME: choose another email address")
 	}
-	longDomain := domainOfWireLength(t, largestDomainLength(t)+1)
-	fitting := 1
-	for nameServerAnswerSizeOf(t, exampleApex, fitting+1) <= maxResponseSize {
-		fitting++
-	}
-	tooManyNameServers := make([]string, fitting+1)
-	for i, addr := range addressesUpTo(fitting + 1) {
+	tooManyNameServers := make([]string, oversizedNameServerList)
+	for i, addr := range addressesUpTo(oversizedNameServerList) {
 		tooManyNameServers[i] = addr.String()
 	}
 
@@ -664,18 +579,11 @@ func TestNewXipStopsOnTheRefusalsOfB7(t *testing.T) {
 			want:        fmt.Sprintf("xip: email %s cannot be the RNAME of the SOA record: %v", longLocalPart, rnameErr),
 		},
 		{
-			name:        "a domain whose negative answer is over the limit",
-			domain:      longDomain,
-			email:       exampleEmail,
-			nameServers: exampleNameServers,
-			want:        fmt.Sprintf("xip: the domain %s and the email address %s make a negative answer of %d octets, more than the limit of 512 octets for a UDP response", longDomain, exampleEmail, negativeAnswerSizeOf(t, longDomain+".", "admin.example.test.")),
-		},
-		{
 			name:        "name servers whose NS answer is over the limit",
 			domain:      exampleDomain,
 			email:       exampleEmail,
 			nameServers: tooManyNameServers,
-			want:        fmt.Sprintf("xip: the answer for example.test. NS takes %d octets, more than the limit of 512 octets for a UDP response; there are too many name servers for this domain", nameServerAnswerSizeOf(t, exampleApex, fitting+1)),
+			want:        fmt.Sprintf("xip: the answer for example.test. NS takes %d octets, more than the limit of 65524 octets for a DNS message; there are too many name servers for this domain", nameServerAnswerSizeOf(t, exampleApex, oversizedNameServerList)),
 		},
 	}
 	for _, tt := range tests {
@@ -706,70 +614,6 @@ func TestNegativeTTL(t *testing.T) {
 			z := &zone{soa: &dns.SOA{Hdr: header(exampleApex, dns.TypeSOA, tt.ttl), Minttl: tt.minimum}}
 			if got := z.negativeTTL(); got != tt.want {
 				t.Errorf("negativeTTL() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-// alternateCase upper-cases every other ASCII letter.
-func alternateCase(name string) string {
-	b := []byte(name)
-	upper := false
-	for i, c := range b {
-		if 'a' <= c && c <= 'z' {
-			if upper {
-				b[i] = c - ('a' - 'A')
-			}
-			upper = !upper
-		}
-	}
-	return string(b)
-}
-
-func TestNegativeAnswerProbeIsTheLargest(t *testing.T) {
-	digits := strings.Repeat("1", 63) + "." + strings.Repeat("2", 63) + "." + strings.Repeat("3", 61)
-	tests := []struct {
-		name   string
-		domain string
-		email  string
-		// compresses marks the configuration where a question in lower case compresses against the RNAME, so that only the upper-case probe measures the largest reply.
-		compresses bool
-	}{
-		{name: "a domain just inside the limit", domain: domainOfWireLength(t, largestDomainLength(t)), email: exampleEmail},
-		{name: "a domain without a letter and an RNAME equal to its longest name", domain: digits, email: strings.Repeat("X", 63) + "@" + digits, compresses: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			xip, err := NewXip(WithDomain(tt.domain), WithEmail(tt.email), WithNameServers([]string{"192.0.2.10"}))
-			if err != nil {
-				t.Fatalf("NewXip: %v", err)
-			}
-			measured, err := xip.zone.largestNegativeSize()
-			if err != nil {
-				t.Fatal(err)
-			}
-			longest := nameOfWireLength(t, maxNameWireLength, tt.domain+".")
-			sizes := map[string]int{}
-			for spelling, qname := range map[string]string{"upper case": strings.ToUpper(longest), "lower case": longest, "alternating case": alternateCase(longest)} {
-				writer := &recordingWriter{}
-				xip.handleDnsRequest(writer, newQuery(qname, dns.TypeA))
-				if writer.written == nil || writer.written.Rcode != dns.RcodeNameError {
-					t.Fatalf("%s: want NXDOMAIN, received:\n%s", spelling, writer.written)
-				}
-				packed, err := writer.written.Pack()
-				if err != nil {
-					t.Fatal(err)
-				}
-				sizes[spelling] = len(packed)
-				if len(packed) > measured {
-					t.Errorf("%s: the reply takes %d octets, more than the %d newZone measured", spelling, len(packed), measured)
-				}
-			}
-			if tt.compresses && sizes["lower case"] >= measured {
-				t.Errorf("the lower-case reply takes %d octets, want fewer than the %d measured: the case this row exists for did not occur", sizes["lower case"], measured)
-			}
-			if measured > maxResponseSize {
-				t.Errorf("measured %d octets, more than the limit", measured)
 			}
 		})
 	}

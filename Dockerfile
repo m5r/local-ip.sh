@@ -15,8 +15,8 @@ COPY --from=build /app/http/static /local-ip/http/static
 
 VOLUME /local-ip/state
 
-#      DNS    HTTP   HTTPS
-EXPOSE 53/udp 80/tcp 443/tcp
+#      DNS           HTTP   HTTPS
+EXPOSE 53/udp 53/tcp 80/tcp 443/tcp
 
 USER root
 

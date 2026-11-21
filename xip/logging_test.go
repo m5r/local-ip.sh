@@ -74,6 +74,12 @@ func newQuery(name string, qtype uint16) *dns.Msg {
 	return query
 }
 
+func withEDNSVersion(query *dns.Msg, version uint8) *dns.Msg {
+	query.SetEdns0(1232, false)
+	query.IsEdns0().SetVersion(version)
+	return query
+}
+
 func logLinesAfter(t *testing.T, buf *bytes.Buffer, offset int) []map[string]any {
 	t.Helper()
 	text := strings.TrimRight(buf.String()[offset:], "\n")
@@ -166,6 +172,14 @@ func TestHandleDnsRequestLogsResolvedAtDebug(t *testing.T) {
 			query:       newQuery("logging-debug.test.", 65280),
 			wantType:    "TYPE65280",
 			wantRcode:   "NOERROR",
+			wantAnswers: []string{},
+		},
+		{
+			// The library's table of rcodes names 16 BADSIG.
+			name:        "an EDNS version other than 0 is BADVERS",
+			query:       withEDNSVersion(newQuery("10-11-12-13.logging-debug.test.", dns.TypeA), 1),
+			wantType:    "A",
+			wantRcode:   "BADVERS",
 			wantAnswers: []string{},
 		},
 	}

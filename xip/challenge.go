@@ -33,7 +33,7 @@ func (xip *Xip) AddChallenge(name, value string) error {
 		return fmt.Errorf("xip: building the TXT answer at %s: %w", xip.challengeName, err)
 	}
 	if size > maxResponseSize {
-		return fmt.Errorf("xip: publishing this value at %s would make the TXT answer %d octets, more than the limit of %d octets for a UDP response", xip.challengeName, size, maxResponseSize)
+		return fmt.Errorf("xip: publishing this value at %s would make the TXT answer %d octets, more than the limit of %d octets for a DNS message", xip.challengeName, size, maxResponseSize)
 	}
 	xip.challengeValues[value] = struct{}{}
 	return nil

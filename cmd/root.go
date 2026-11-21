@@ -69,10 +69,10 @@ func shutdownContext() (context.Context, context.CancelFunc) {
 
 // config turns the options into an app.Config. It parses each option into its type and fails on a value that does not parse; what a value means (a valid domain, email or name server) is checked by the packages that depend on it.
 func config() (app.Config, error) {
-	// Fly only delivers UDP to a socket bound to fly-global-services.
-	dnsHost := ""
+	// Fly only delivers UDP to a socket bound to fly-global-services, and TCP to a socket on any interface.
+	dnsUDPHost := ""
 	if os.Getenv("FLY_APP_NAME") != "" {
-		dnsHost = "fly-global-services"
+		dnsUDPHost = "fly-global-services"
 	}
 
 	staging, err := boolOption("staging")
@@ -99,18 +99,19 @@ func config() (app.Config, error) {
 	}
 
 	return app.Config{
-		Domain:       viper.GetString("domain"),
-		Email:        viper.GetString("email"),
-		NameServers:  nameServers,
-		ZoneFile:     viper.GetString("zone-file"),
-		DNSAddress:   net.JoinHostPort(dnsHost, ports["dns-port"]),
-		HTTPAddress:  ":" + ports["http-port"],
-		HTTPSAddress: ":" + ports["https-port"],
-		StateDir:     viper.GetString("state-dir"),
-		StaticDir:    "./http/static",
-		DirectoryURL: directoryURL,
-		ACMEProfile:  viper.GetString("acme-profile"),
-		Logger:       utils.Logger,
+		Domain:        viper.GetString("domain"),
+		Email:         viper.GetString("email"),
+		NameServers:   nameServers,
+		ZoneFile:      viper.GetString("zone-file"),
+		DNSUDPAddress: net.JoinHostPort(dnsUDPHost, ports["dns-port"]),
+		DNSTCPAddress: ":" + ports["dns-port"],
+		HTTPAddress:   ":" + ports["http-port"],
+		HTTPSAddress:  ":" + ports["https-port"],
+		StateDir:      viper.GetString("state-dir"),
+		StaticDir:     "./http/static",
+		DirectoryURL:  directoryURL,
+		ACMEProfile:   viper.GetString("acme-profile"),
+		Logger:        utils.Logger,
 	}, nil
 }
 

@@ -13,14 +13,15 @@ import (
 
 func TestRunEndsWhenDNSStops(t *testing.T) {
 	a, err := New(Config{
-		Domain:       "app.test",
-		Email:        "admin@app.test",
-		NameServers:  []string{"192.0.2.53"},
-		DNSAddress:   "127.0.0.1:0",
-		HTTPAddress:  "127.0.0.1:0",
-		HTTPSAddress: "127.0.0.1:0",
-		StateDir:     t.TempDir(),
-		StaticDir:    "../http/static",
+		Domain:        "app.test",
+		Email:         "admin@app.test",
+		NameServers:   []string{"192.0.2.53"},
+		DNSUDPAddress: "127.0.0.1:0",
+		DNSTCPAddress: "127.0.0.1:0",
+		HTTPAddress:   "127.0.0.1:0",
+		HTTPSAddress:  "127.0.0.1:0",
+		StateDir:      t.TempDir(),
+		StaticDir:     "../http/static",
 		// Nothing listens there: the manager's orders fail, which must not matter.
 		DirectoryURL: "https://127.0.0.1:1/dir",
 		ACMEProfile:  "default",
@@ -37,7 +38,7 @@ func TestRunEndsWhenDNSStops(t *testing.T) {
 	// An answer shows the read loop runs, so that what follows tests a loop that ends, not one that never started.
 	message := new(dns.Msg)
 	message.SetQuestion("10-0-0-1.app.test.", dns.TypeA)
-	if _, _, err := (&dns.Client{Net: "udp", Timeout: 5 * time.Second}).Exchange(message, a.DNSAddr().String()); err != nil {
+	if _, _, err := (&dns.Client{Net: "udp", Timeout: 5 * time.Second}).Exchange(message, a.DNSUDPAddr().String()); err != nil {
 		t.Fatalf("the DNS server does not answer: %v", err)
 	}
 

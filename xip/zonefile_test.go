@@ -661,7 +661,7 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 		{
 			name:    "F19 TXT record of exactly 65535 octets of data inside the zone",
 			content: "big TXT \"" + strings.Repeat("x", 65279) + "\"\n",
-			want:    "zone file test.zone: the answer for big.example.test. TXT takes 65581 octets, more than the limit of 512 octets for a UDP response",
+			want:    "zone file test.zone: the answer for big.example.test. TXT takes 65581 octets, more than the limit of 65524 octets for a DNS message",
 		},
 		{
 			name:    "F4 NS record outside the zone",
@@ -944,9 +944,9 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("example.test.", "MX", "target _acme-challenge.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
-			name:    "F19 referral larger than a UDP response",
-			content: manyNameServers(10),
-			want:    "zone file test.zone: delegation sub.example.test.: the largest referral takes 627 octets, more than the limit of 512 octets for a UDP response",
+			name:    "F19 referral larger than a DNS message",
+			content: manyNameServers(oversizedNameServerCount),
+			want:    fmt.Sprintf("zone file test.zone: delegation sub.example.test.: the largest referral takes %d octets, more than the limit of 65524 octets for a DNS message", manyNameServersReferralSize(t, oversizedNameServerCount)),
 		},
 	}
 
@@ -1071,13 +1071,13 @@ func TestParseZoneFileReportsFaultsInOrder(t *testing.T) {
 		},
 		{
 			name:    "a fault of the targets (F18) comes before a size fault (F19) declared earlier",
-			content: "big TXT \"" + strings.Repeat("x", 500) + "\"\n@ MX 10 mial\n",
+			content: "big TXT \"" + strings.Repeat("x", 65279) + "\"\n@ MX 10 mial\n",
 			want:    recordFault("example.test.", "MX", "target mial.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
 			name:    "the size of a record set comes before the size of a referral declared earlier",
-			content: manyNameServers(10) + "big TXT \"" + strings.Repeat("x", 500) + "\"\n",
-			want:    "zone file test.zone: the answer for big.example.test. TXT takes 548 octets, more than the limit of 512 octets for a UDP response",
+			content: manyNameServers(oversizedNameServerCount) + "big TXT \"" + strings.Repeat("x", 65279) + "\"\n",
+			want:    "zone file test.zone: the answer for big.example.test. TXT takes 65581 octets, more than the limit of 65524 octets for a DNS message",
 		},
 		{
 			name:    "one record is checked against F15 before F16",
@@ -1126,6 +1126,9 @@ func answerSizeFor(t *testing.T, qname string, records ...string) int {
 	return len(packed)
 }
 
+// largestFittingTXTLength is the length of the one string of a TXT record at big.example.test. whose answer takes 65524 octets, the most that fits in a DNS message with the server's OPT record of 11 octets.
+const largestFittingTXTLength = 65222
+
 func TestParseZoneFileAnswerSizeBoundary(t *testing.T) {
 	const owner = "big.example.test."
 	txt := func(length int) string { return strings.Repeat("x", length) }
@@ -1137,85 +1140,92 @@ func TestParseZoneFileAnswerSizeBoundary(t *testing.T) {
 		}
 		return answerSizeOf(t, owner, rr.String())
 	}
-	fitting := 1
-	for sizeOf(fitting+1) <= dns.MinMsgSize {
-		fitting++
+	if got := sizeOf(largestFittingTXTLength); got != maxReplyWithoutOPT {
+		t.Fatalf("a TXT string of %d octets makes an answer of %d octets, want exactly %d", largestFittingTXTLength, got, maxReplyWithoutOPT)
 	}
-	if got := sizeOf(fitting); got != dns.MinMsgSize {
-		t.Fatalf("the largest fitting TXT record makes an answer of %d octets, want exactly %d: choose another owner", got, dns.MinMsgSize)
-	}
-	if got := sizeOf(fitting + 1); got != dns.MinMsgSize+1 {
-		t.Fatalf("one octet more makes an answer of %d octets, want %d: choose another owner", got, dns.MinMsgSize+1)
+	if got := sizeOf(largestFittingTXTLength + 1); got != maxReplyWithoutOPT+1 {
+		t.Fatalf("one octet more makes an answer of %d octets, want %d", got, maxReplyWithoutOPT+1)
 	}
 
-	t.Run("a TXT record set whose answer takes 512 octets is accepted", func(t *testing.T) {
-		if _, err := parseZoneFile(strings.NewReader(fmt.Sprintf("big TXT \"%s\"\n", txt(fitting))), testZoneFileName, testServer); err != nil {
+	t.Run("a TXT record set whose answer takes 65524 octets is accepted", func(t *testing.T) {
+		if _, err := parseZoneFile(strings.NewReader(fmt.Sprintf("big TXT \"%s\"\n", txt(largestFittingTXTLength))), testZoneFileName, testServer); err != nil {
 			t.Fatalf("parseZoneFile: %v", err)
 		}
 	})
-	t.Run("a TXT record set whose answer takes 513 octets is refused", func(t *testing.T) {
-		expectZoneFileError(t, fmt.Sprintf("big TXT \"%s\"\n", txt(fitting+1)), "zone file test.zone: the answer for big.example.test. TXT takes 513 octets, more than the limit of 512 octets for a UDP response")
+	t.Run("a TXT record set whose answer takes 65525 octets is refused", func(t *testing.T) {
+		expectZoneFileError(t, fmt.Sprintf("big TXT \"%s\"\n", txt(largestFittingTXTLength+1)), "zone file test.zone: the answer for big.example.test. TXT takes 65525 octets, more than the limit of 65524 octets for a DNS message")
 	})
 	t.Run("the records of one set are measured together", func(t *testing.T) {
-		first, second := txt(fitting/2), strings.Repeat("y", fitting/2)
+		half := largestFittingTXTLength / 2
+		first, second := txt(half), strings.Repeat("y", half)
 		size := answerSizeOf(t, owner, fmt.Sprintf("%s 300 IN TXT %q", owner, first), fmt.Sprintf("%s 300 IN TXT %q", owner, second))
-		if size <= dns.MinMsgSize {
-			t.Fatalf("two TXT records of %d octets make an answer of %d octets, want more than %d", fitting/2, size, dns.MinMsgSize)
+		if size <= maxReplyWithoutOPT {
+			t.Fatalf("two TXT records of %d octets make an answer of %d octets, want more than %d", half, size, maxReplyWithoutOPT)
 		}
 		content := fmt.Sprintf("big TXT \"%s\"\nbig TXT \"%s\"\n", first, second)
-		expectZoneFileError(t, content, fmt.Sprintf("zone file test.zone: the answer for big.example.test. TXT takes %d octets, more than the limit of 512 octets for a UDP response", size))
+		expectZoneFileError(t, content, fmt.Sprintf("zone file test.zone: the answer for big.example.test. TXT takes %d octets, more than the limit of 65524 octets for a DNS message", size))
 	})
 }
 
-// TestParseZoneFileMeasuresAnswersForAnUpperCaseQuestion uses an MX set whose targets are inside the zone: a lower-case question lets them compress against it, so the set fits for that question and not for the upper-case one, which the loader must measure.
+// TestParseZoneFileMeasuresAnswersForAnUpperCaseQuestion uses an MX set whose targets are below its owner: a lower-case question lets every target compress against it, so the set fits for that question and not for the upper-case one, which the loader must measure.
 func TestParseZoneFileMeasuresAnswersForAnUpperCaseQuestion(t *testing.T) {
-	setOf := func(owner string, count int) []string {
+	label := strings.Repeat("m", maxLabelLength)
+	owner := label + ".example.test."
+	target := func(i int) string { return fmt.Sprintf("10-0-%d-%d.%s", i/256, i%256, owner) }
+	setOf := func(count int) []string {
 		records := make([]string, count)
 		for i := range count {
-			records[i] = fmt.Sprintf("%s 300 IN MX 10 10-0-0-%d.example.test.", owner, i+1)
+			records[i] = fmt.Sprintf("%s 300 IN MX 10 %s", owner, target(i))
 		}
 		return records
 	}
 
-	var label string
-	var count, upperSize int
-	found := false
-search:
-	for count = 1; count < 50; count++ {
-		for length := 1; length <= maxLabelLength; length++ {
-			label = strings.Repeat("m", length)
-			owner := label + ".example.test."
-			lowerSize := answerSizeFor(t, owner, setOf(owner, count)...)
-			upperSize = answerSizeOf(t, owner, setOf(owner, count)...)
-			if lowerSize <= dns.MinMsgSize && upperSize > dns.MinMsgSize {
-				found = true
-				break search
-			}
+	// The smallest set too large for an upper-case question, found by bisection since the sets are large.
+	low, high := 1, 4096
+	if answerSizeOf(t, owner, setOf(high)...) <= maxReplyWithoutOPT {
+		t.Fatalf("%d MX records fit: choose more", high)
+	}
+	for low < high {
+		mid := (low + high) / 2
+		if answerSizeOf(t, owner, setOf(mid)...) > maxReplyWithoutOPT {
+			high = mid
+		} else {
+			low = mid + 1
 		}
 	}
-	if !found {
-		t.Fatal("no MX set was found whose answer fits for a lower-case question and not for an upper-case one")
+	count := low
+	upperSize := answerSizeOf(t, owner, setOf(count)...)
+	if lowerSize := answerSizeFor(t, owner, setOf(count)...); lowerSize > maxReplyWithoutOPT {
+		t.Fatalf("%d MX records make an answer of %d octets for a lower-case question, which does not fit either: choose another owner", count, lowerSize)
 	}
 
 	var content strings.Builder
 	for i := range count {
-		fmt.Fprintf(&content, "%s MX 10 10-0-0-%d\n", label, i+1)
+		fmt.Fprintf(&content, "%s MX 10 %s\n", label, target(i))
 	}
-	expectZoneFileError(t, content.String(), fmt.Sprintf("zone file test.zone: the answer for %s.example.test. MX takes %d octets, more than the limit of 512 octets for a UDP response", label, upperSize))
+	expectZoneFileError(t, content.String(), fmt.Sprintf("zone file test.zone: the answer for %s MX takes %d octets, more than the limit of 65524 octets for a DNS message", owner, upperSize))
 }
+
+// oversizedNameServerCount is a number of in-cut name servers whose referral does not fit in a DNS message.
+const oversizedNameServerCount = 2000
 
 func manyNameServers(n int) string {
 	var b strings.Builder
 	for i := range n {
-		fmt.Fprintf(&b, "sub NS ns%d.sub\nns%d.sub A 192.0.2.%d\n", i, i, i+1)
+		fmt.Fprintf(&b, "sub NS ns%d.sub\nns%d.sub A %s\n", i, i, manyNameServersAddress(i))
 	}
 	return b.String()
+}
+
+// manyNameServersAddress is the address of the i-th name server of manyNameServers, a different one for each.
+func manyNameServersAddress(i int) string {
+	return fmt.Sprintf("10.0.%d.%d", i/256, i%256)
 }
 
 // referralProbe is the longest name inside sub.example.test. in upper case, written out so that the referral tests do not take the probe from the code under test.
 var referralProbe = strings.ToUpper(strings.Repeat("x", 63) + "." + strings.Repeat("x", 63) + "." + strings.Repeat("x", 63) + "." + strings.Repeat("x", 44) + ".sub.example.test.")
 
-// referralSizeOf packs the referral of a delegation of sub.example.test. for the probe name, independently of parseZoneFile, so the boundary tests do not trust the code under test to find the boundary.
+// referralSizeOf packs the referral of a delegation of sub.example.test. for the probe name, independently of parseZoneFile, so the size tests do not trust the code under test to measure.
 func referralSizeOf(t *testing.T, nameServers, glue []string) int {
 	t.Helper()
 	msg := new(dns.Msg)
@@ -1234,87 +1244,15 @@ func referralSizeOf(t *testing.T, nameServers, glue []string) int {
 	return len(packed)
 }
 
-// outOfZoneNameServer returns a name server name outside the zone whose labels in front of other.test. take extra octets in wire format, so that each extra octet makes the referral one octet longer.
-func outOfZoneNameServer(extra int) string {
-	var prefix strings.Builder
-	for extra >= 2 {
-		length := min(maxLabelLength, extra-1)
-		if extra-(length+1) == 1 {
-			length--
-		}
-		prefix.WriteString(strings.Repeat("n", length))
-		prefix.WriteByte('.')
-		extra -= length + 1
-	}
-	return prefix.String() + "other.test."
-}
-
-func TestParseZoneFileReferralSizeBoundary(t *testing.T) {
-	sizeWith := func(extra int) int {
-		return referralSizeOf(t, []string{"sub.example.test. 300 IN NS " + outOfZoneNameServer(extra)}, nil)
-	}
-	extra := 2
-	for sizeWith(extra+1) <= dns.MinMsgSize {
-		extra++
-	}
-	if got := sizeWith(extra); got != dns.MinMsgSize {
-		t.Fatalf("the largest fitting name server name makes a referral of %d octets, want exactly %d", got, dns.MinMsgSize)
-	}
-	if got := sizeWith(extra + 1); got != dns.MinMsgSize+1 {
-		t.Fatalf("one octet more makes a referral of %d octets, want %d", got, dns.MinMsgSize+1)
-	}
-
-	tests := []struct {
-		name    string
-		content string
-		want    string
-	}{
-		{name: "a production-shaped delegation is accepted", content: "xip-staging NS ns1.xip-staging\nns1.xip-staging A 149.248.203.129\n"},
-		{name: "a delegation whose largest referral takes 512 octets is accepted", content: "sub NS " + outOfZoneNameServer(extra) + "\n"},
-		{
-			name:    "a delegation whose largest referral takes 513 octets is refused",
-			content: "sub NS " + outOfZoneNameServer(extra+1) + "\n",
-			want:    "zone file test.zone: delegation sub.example.test.: the largest referral takes 513 octets, more than the limit of 512 octets for a UDP response",
-		},
-		{name: "the largest number of in-cut name servers that fits is accepted", content: manyNameServers(largestFittingNameServerCount(t))},
-		{
-			name:    "one in-cut name server more is refused",
-			content: manyNameServers(largestFittingNameServerCount(t) + 1),
-			want:    fmt.Sprintf("zone file test.zone: delegation sub.example.test.: the largest referral takes %d octets, more than the limit of 512 octets for a UDP response", manyNameServersReferralSize(t, largestFittingNameServerCount(t)+1)),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.want != "" {
-				expectZoneFileError(t, tt.content, tt.want)
-				return
-			}
-			if _, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer); err != nil {
-				t.Fatalf("parseZoneFile: %v", err)
-			}
-		})
-	}
-}
-
 // manyNameServersReferralSize is the size of the referral for the delegation manyNameServers(n) declares.
 func manyNameServersReferralSize(t *testing.T, n int) int {
 	t.Helper()
 	var nameServers, glue []string
 	for i := range n {
 		nameServers = append(nameServers, fmt.Sprintf("sub.example.test. 300 IN NS ns%d.sub.example.test.", i))
-		glue = append(glue, fmt.Sprintf("ns%d.sub.example.test. 300 IN A 192.0.2.%d", i, i+1))
+		glue = append(glue, fmt.Sprintf("ns%d.sub.example.test. 300 IN A %s", i, manyNameServersAddress(i)))
 	}
 	return referralSizeOf(t, nameServers, glue)
-}
-
-func largestFittingNameServerCount(t *testing.T) int {
-	t.Helper()
-	n := 1
-	for manyNameServersReferralSize(t, n+1) <= dns.MinMsgSize {
-		n++
-	}
-	return n
 }
 
 func mustRR(t *testing.T, record string) dns.RR {
@@ -1477,6 +1415,16 @@ func TestIsProjectCut(t *testing.T) {
 // hostedDKIMValue is the DKIM key the hosted instance served from compiled-in records before they moved to its zone file.
 const hostedDKIMValue = "v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMW6NFo34qzKRPbzK41GwbWncB8IDg1i2eA2VWznIVDmTzzsqILaBOGv2xokVpzZm0QRF9wSbeVUmvwEeQ7Z6wkfMjawenDEc3XxsNSvQUVBP6LU/xcm1zsR8wtD8r5J+Jm45pNFaateiM/kb/Eypp2ntdtd8CPsEgCEDpNb62LWdy0yzRdZ/M/fNn51UMN8hVFp4YfZngAt3bQwa6kPtgvTeqEbpNf5xanpDysNJt2S8zfqJMVGvnr8JaJiTv7ZlKMMp94aC5Ndcir1WbMyfmgSnGgemuCTVMWDGPJnXDi+8BQMH1b1hmTpWDiVdVlehyyWx5AfPrsWG9cEuDIfXwIDAQAB"
 
+// stagingTXTRecords spells a TXT set the staging zone file declares for the e2e suite's truncation cases: n records, each of one string of 180 octets that starts with its position.
+func stagingTXTRecords(label string, n int) []string {
+	records := make([]string, n)
+	for i := range n {
+		prefix := fmt.Sprintf("%s record %d of %d ", label, i+1, n)
+		records[i] = fmt.Sprintf(`%s.xip-staging.local-ip.sh. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
+	}
+	return records
+}
+
 // recordSetCount counts the distinct owner and type pairs among records.
 func recordSetCount(records []dns.RR) int {
 	type setKey struct {
@@ -1532,7 +1480,7 @@ func TestRepositoryZoneFiles(t *testing.T) {
 			challengeName: "_acme-challenge.xip-staging.local-ip.sh.",
 			addresses:     []netip.Addr{netip.MustParseAddr("149.248.203.129")},
 			cuts:          []string{"e2e-delegated.xip-staging.local-ip.sh."},
-			records: []string{
+			records: append([]string{
 				"e2e-records.xip-staging.local-ip.sh. 300 IN A 192.0.2.10",
 				"e2e-records.xip-staging.local-ip.sh. 300 IN AAAA 2001:db8::10",
 				`e2e-records.xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh e2e" "second string"`,
@@ -1541,8 +1489,8 @@ func TestRepositoryZoneFiles(t *testing.T) {
 				"e2e-alias.xip-staging.local-ip.sh. 600 IN CNAME target.example.net.",
 				"_e2e._tcp.xip-staging.local-ip.sh. 300 IN SRV 0 0 443 target.example.net.",
 				`xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh test instance"`,
-			},
-			recordSets: 8,
+			}, append(stagingTXTRecords("e2e-txt-udp", 4), stagingTXTRecords("e2e-txt-tcp", 12)...)...),
+			recordSets: 10,
 		},
 	}
 
@@ -1613,9 +1561,9 @@ func TestRepositoryZoneFilesHostedDKIMRecord(t *testing.T) {
 			t.Errorf("strings = %q, want %q", got, want)
 		}
 	})
-	t.Run("its answer fits in a UDP response", func(t *testing.T) {
-		if size := answerSizeOf(t, owner, dkim[0].String()); size > dns.MinMsgSize {
-			t.Errorf("the answer for %s TXT takes %d octets, more than %d", owner, size, dns.MinMsgSize)
+	t.Run("its answer fits in a UDP reply without EDNS", func(t *testing.T) {
+		if size := answerSizeOf(t, owner, dkim[0].String()); size > classicUDPLimit {
+			t.Errorf("the answer for %s TXT takes %d octets, more than %d", owner, size, classicUDPLimit)
 		}
 	})
 }
