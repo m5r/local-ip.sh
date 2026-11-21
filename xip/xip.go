@@ -8,7 +8,6 @@ import (
 	"net/mail"
 	"net/netip"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -25,15 +24,11 @@ const shutdownTimeout = 2 * time.Second
 
 type Xip struct {
 	nameServerAddresses []string
-	nameServers         []string
 	domain              string
 	email               string
-	recordsMu           sync.RWMutex
-	records             map[string]hardcodedRecord
 	zoneFile            string
-	delegations         *zoneCuts
+	zone                *zone
 	logger              zerolog.Logger
-	mux                 *dns.ServeMux
 	challengeName       string
 	challengeMu         sync.RWMutex
 	challengeValues     map[string]struct{}
@@ -72,236 +67,13 @@ func WithNameServers(addresses []string) Option {
 	}
 }
 
-var (
-	flyRegion       = os.Getenv("FLY_REGION")
-	dottedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
-	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
-)
-
-func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
-	normalizedFqdn := strings.ToLower(fqdn)
-	xip.recordsMu.RLock()
-	records := xip.records[normalizedFqdn].A
-	xip.recordsMu.RUnlock()
-	if records != nil {
-		var aRecords []*dns.A
-
-		for _, record := range records {
-			aRecords = append(aRecords, &dns.A{
-				Hdr: dns.RR_Header{
-					Ttl:    uint32((time.Minute * 5).Seconds()),
-					Name:   fqdn,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-				},
-				A: record,
-			})
-		}
-
-		return aRecords
-	}
-
-	for _, ipV4RE := range []*regexp.Regexp{dashedIpV4Regex, dottedIpV4Regex} {
-		if ipV4RE.MatchString(fqdn) {
-			match := ipV4RE.FindStringSubmatch(fqdn)[1]
-			match = strings.ReplaceAll(match, "-", ".")
-			ipV4Address := net.ParseIP(match).To4()
-			if ipV4Address == nil {
-				return nil
-			}
-
-			return []*dns.A{{
-				Hdr: dns.RR_Header{
-					Ttl:    uint32((time.Minute * 5).Seconds()),
-					Name:   fqdn,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-				},
-				A: ipV4Address,
-			}}
-		}
-	}
-
-	return nil
-}
-
-func (xip *Xip) answerWithAuthority(question dns.Question, message *dns.Msg) {
-	message.Ns = append(message.Ns, xip.soaRecord(question.Name, uint32((time.Minute*5).Seconds())))
-}
-
-func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	aRecords := xip.fqdnToA(fqdn)
-
-	if len(aRecords) == 0 {
-		message.Rcode = dns.RcodeNameError
-		xip.answerWithAuthority(question, message)
-		return
-	}
-
-	for _, record := range aRecords {
-		message.Answer = append(message.Answer, record)
-	}
-}
-
-func (xip *Xip) handleAAAA(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	normalizedFqdn := strings.ToLower(fqdn)
-	xip.recordsMu.RLock()
-	records := xip.records[normalizedFqdn].AAAA
-	xip.recordsMu.RUnlock()
-	if records == nil {
-		xip.answerWithAuthority(question, message)
-		return
-	}
-
-	for _, record := range records {
-		message.Answer = append(message.Answer, &dns.AAAA{
-			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Minute * 5).Seconds()),
-				Name:   fqdn,
-				Rrtype: dns.TypeAAAA,
-				Class:  dns.ClassINET,
-			},
-			AAAA: record,
-		})
-	}
-}
-
-func (xip *Xip) handleNS(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	nameServers := []*dns.NS{}
-	additionals := []*dns.A{}
-	for _, ns := range xip.nameServers {
-		nameServers = append(nameServers, &dns.NS{
-			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Minute * 5).Seconds()),
-				Name:   fqdn,
-				Rrtype: dns.TypeNS,
-				Class:  dns.ClassINET,
-			},
-			Ns: ns,
-		})
-
-		additionals = append(additionals, xip.fqdnToA(ns)...)
-	}
-
-	for _, record := range nameServers {
-		message.Answer = append(message.Answer, record)
-	}
-
-	for _, record := range additionals {
-		message.Extra = append(message.Extra, record)
-	}
-}
+var flyRegion = os.Getenv("FLY_REGION")
 
 func chunkBy(str string, chunkSize int) (chunks []string) {
 	for chunkSize < len(str) {
 		str, chunks = str[chunkSize:], append(chunks, str[0:chunkSize])
 	}
 	return append(chunks, str)
-}
-
-func (xip *Xip) handleTXT(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	normalizedFqdn := strings.ToLower(fqdn)
-	xip.recordsMu.RLock()
-	records := xip.records[normalizedFqdn].TXT
-	xip.recordsMu.RUnlock()
-	if records == nil {
-		xip.answerWithAuthority(question, message)
-		return
-	}
-
-	for _, record := range records {
-		message.Answer = append(message.Answer, &dns.TXT{
-			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Minute * 5).Seconds()),
-				Name:   fqdn,
-				Rrtype: dns.TypeTXT,
-				Class:  dns.ClassINET,
-			},
-			Txt: chunkBy(record, 255),
-		})
-	}
-}
-
-func (xip *Xip) handleMX(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	normalizedFqdn := strings.ToLower(fqdn)
-	xip.recordsMu.RLock()
-	records := xip.records[normalizedFqdn].MX
-	xip.recordsMu.RUnlock()
-	if records == nil {
-		xip.answerWithAuthority(question, message)
-		return
-	}
-
-	for _, record := range records {
-		message.Answer = append(message.Answer, &dns.MX{
-			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Minute * 5).Seconds()),
-				Name:   fqdn,
-				Rrtype: dns.TypeMX,
-				Class:  dns.ClassINET,
-			},
-			Mx:         record.Mx,
-			Preference: record.Preference,
-		})
-	}
-}
-
-func (xip *Xip) handleCNAME(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	normalizedFqdn := strings.ToLower(fqdn)
-	xip.recordsMu.RLock()
-	records := xip.records[normalizedFqdn].CNAME
-	xip.recordsMu.RUnlock()
-	if records == nil {
-		xip.answerWithAuthority(question, message)
-		return
-	}
-
-	for _, record := range records {
-		message.Answer = append(message.Answer, &dns.CNAME{
-			Hdr: dns.RR_Header{
-				Ttl:    uint32((time.Minute * 5).Seconds()),
-				Name:   fqdn,
-				Rrtype: dns.TypeCNAME,
-				Class:  dns.ClassINET,
-			},
-			Target: record,
-		})
-	}
-}
-
-func (xip *Xip) handleSRV(question dns.Question, message *dns.Msg) {
-	fqdn := question.Name
-	normalizedFqdn := strings.ToLower(fqdn)
-	xip.recordsMu.RLock()
-	record := xip.records[normalizedFqdn].SRV
-	xip.recordsMu.RUnlock()
-	if record == nil {
-		xip.answerWithAuthority(question, message)
-		return
-	}
-
-	message.Answer = append(message.Answer, &dns.SRV{
-		Hdr: dns.RR_Header{
-			Ttl:    uint32((time.Minute * 5).Seconds()),
-			Name:   fqdn,
-			Rrtype: dns.TypeSRV,
-			Class:  dns.ClassINET,
-		},
-		Priority: record.Priority,
-		Weight:   record.Weight,
-		Port:     record.Port,
-		Target:   record.Target,
-	})
-}
-
-func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
-	message.Answer = append(message.Answer, xip.soaRecord(question.Name, uint32((time.Minute*5).Seconds())))
 }
 
 func emailToRname(email string) string {
@@ -311,85 +83,14 @@ func emailToRname(email string) string {
 	return localPart + "." + domain + "."
 }
 
-func (xip *Xip) soaRecord(name string, ttl uint32) *dns.SOA {
-	soa := new(dns.SOA)
-	soa.Hdr = dns.RR_Header{
-		Name:     name,
-		Rrtype:   dns.TypeSOA,
-		Class:    dns.ClassINET,
-		Ttl:      ttl,
-		Rdlength: 0,
-	}
-	soa.Ns = xip.nameServers[0]
-	soa.Mbox = emailToRname(xip.email)
-	soa.Serial = 2024072600
-	soa.Refresh = uint32((time.Minute * 15).Seconds())
-	soa.Retry = uint32((time.Minute * 15).Seconds())
-	soa.Expire = uint32((time.Minute * 30).Seconds())
-	soa.Minttl = uint32((time.Minute * 5).Seconds())
-
-	return soa
-}
-
-func (xip *Xip) handleQuery(message *dns.Msg) {
-	if len(message.Question) != 1 {
-		// see https://serverfault.com/a/742788
-		xip.logger.Error().Any("questions", message.Question).Msg("Received an incorrect amount of questions")
-		message.MsgHdr.Rcode = dns.RcodeFormatError
-		return
-	}
-
-	question := message.Question[0]
-	if cut, d, ok := xip.delegations.find(question.Name); ok {
-		// A DS RRset at a zone cut belongs to the parent zone (RFC 4035 section 3.1.4.1).
-		if question.Qtype != dns.TypeDS || dns.CanonicalName(question.Name) != cut {
-			message.Authoritative = false
-			message.Ns = append(message.Ns, d.nameServers...)
-			message.Extra = append(message.Extra, d.glue...)
-			return
-		}
-	}
-
-	if dns.CanonicalName(question.Name) == xip.challengeName {
-		xip.handleChallenge(question, message)
-		return
-	}
-
-	switch question.Qtype {
-	case dns.TypeA:
-		xip.handleA(question, message)
-	case dns.TypeAAAA:
-		xip.handleAAAA(question, message)
-	case dns.TypeNS:
-		xip.handleNS(question, message)
-	case dns.TypeTXT:
-		xip.handleTXT(question, message)
-	case dns.TypeMX:
-		xip.handleMX(question, message)
-	case dns.TypeCNAME:
-		xip.handleCNAME(question, message)
-	case dns.TypeSRV:
-		xip.handleSRV(question, message)
-	case dns.TypeSOA:
-		xip.handleSOA(question, message)
-	default:
-		xip.handleSOA(question, message)
-	}
-}
-
 func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) {
 	message := new(dns.Msg)
 	message.SetReply(request)
 	message.Compress = true
-	message.Authoritative = true
 	message.RecursionAvailable = false
-
-	switch request.Opcode {
-	case dns.OpcodeQuery:
-		xip.handleQuery(message)
-	default:
-		message.MsgHdr.Rcode = dns.RcodeRefused
-	}
+	// The server validates nothing, so the CD flag SetReply copied from the query would be a false claim (RFC 8906 section 8.1.3.1).
+	message.CheckingDisabled = false
+	xip.answer(request, message)
 
 	if err := response.WriteMsg(message); err != nil {
 		event := xip.logger.Error().Err(err)
@@ -402,6 +103,63 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 	}
 
 	xip.logResolved(message)
+}
+
+// answer fills message, the reply SetReply built for request, by the first rule of B3 that matches.
+// The refusals look at the request: SetReply keeps only its first question.
+func (xip *Xip) answer(request, message *dns.Msg) {
+	if request.Opcode != dns.OpcodeQuery {
+		message.Rcode = dns.RcodeNotImplemented
+		return
+	}
+	if len(request.Question) != 1 {
+		message.Rcode = dns.RcodeFormatError
+		return
+	}
+	question := request.Question[0]
+	switch {
+	case question.Qclass == 0:
+		// The library parses a question cut short after its name or its type with class 0, a value no query may carry (RFC 6895 section 3.2).
+		message.Rcode = dns.RcodeFormatError
+		return
+	case question.Qclass != dns.ClassINET, question.Qtype == dns.TypeAXFR, question.Qtype == dns.TypeIXFR:
+		message.Rcode = dns.RcodeRefused
+		return
+	case !dns.IsSubDomain(xip.zone.apex, question.Name):
+		message.Rcode = dns.RcodeRefused
+		return
+	}
+
+	name := dns.CanonicalName(question.Name)
+	if cut, d, ok := xip.zone.cuts.find(name); ok {
+		// A DS record set at a cut belongs to the parent zone (RFC 4035 section 3.1.4.1), which is this one and has none.
+		if question.Qtype != dns.TypeDS || name != cut {
+			message.Ns = copies(d.nameServers)
+			message.Extra = copies(d.glue)
+			return
+		}
+		message.Authoritative = true
+		message.Ns = xip.zone.negativeAuthority(xip.zone.negativeTTL())
+		return
+	}
+
+	message.Authoritative = true
+	if name == xip.challengeName {
+		xip.handleChallenge(question, message)
+		return
+	}
+
+	kind, answer, additional := xip.zone.lookup(question, name)
+	switch kind {
+	case lookupAnswer:
+		message.Answer = answer
+		message.Extra = additional
+	case lookupNoData:
+		message.Ns = xip.zone.negativeAuthority(xip.zone.negativeTTL())
+	case lookupNoName:
+		message.Rcode = dns.RcodeNameError
+		message.Ns = xip.zone.negativeAuthority(xip.zone.negativeTTL())
+	}
 }
 
 // logResolved computes nothing unless debug is enabled: at the default level this runs once per
@@ -447,7 +205,7 @@ func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn) error {
 	started := make(chan struct{})
 	server := &dns.Server{
 		PacketConn:        conn,
-		Handler:           xip.mux,
+		Handler:           dns.HandlerFunc(xip.handleDnsRequest),
 		NotifyStartedFunc: func() { close(started) },
 	}
 	served := make(chan error, 1)
@@ -482,67 +240,9 @@ func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn) error {
 	return nil
 }
 
-func (xip *Xip) initNameServers() {
-	rootDomainARecords := []net.IP{}
-
-	xip.recordsMu.Lock()
-	defer xip.recordsMu.Unlock()
-
-	for i, ns := range xip.nameServerAddresses {
-		name := fmt.Sprintf("ns%d.%s.", i+1, xip.domain)
-		ip := net.ParseIP(ns)
-
-		rootDomainARecords = append(rootDomainARecords, ip)
-		entry := xip.records[name]
-		entry.A = append(xip.records[name].A, ip)
-		xip.records[name] = entry
-
-		xip.nameServers = append(xip.nameServers, name)
-	}
-
-	xip.records[fmt.Sprintf("%s.", xip.domain)] = hardcodedRecord{A: rootDomainARecords}
-}
-
-func (xip *Xip) loadZoneFile() error {
-	file, err := os.Open(xip.zoneFile)
-	if err != nil {
-		return fmt.Errorf("opening zone file %s: %w", xip.zoneFile, err)
-	}
-	defer file.Close()
-
-	server := zoneServer{
-		origin:   xip.domain,
-		reserved: append(slices.Clone(xip.nameServers), xip.challengeName),
-	}
-	xip.recordsMu.RLock()
-	for _, name := range xip.nameServers {
-		for _, ip := range xip.records[name].A {
-			if addr, ok := netip.AddrFromSlice(ip); ok {
-				server.addresses = append(server.addresses, addr.Unmap())
-			}
-		}
-	}
-	xip.recordsMu.RUnlock()
-
-	delegations, err := parseDelegations(file, xip.zoneFile, server)
-	if err != nil {
-		return err
-	}
-	xip.delegations = delegations
-
-	cuts := delegations.sortedCuts()
-	xip.logger.Info().
-		Str("zone_file", xip.zoneFile).
-		Int("delegations", len(cuts)).
-		Strs("cuts", cuts).
-		Msg("Loaded zone file")
-	return nil
-}
-
 // NewXip builds a server for one zone. It requires a valid domain (WithDomain), a bare email address for the SOA record (WithEmail) and at least one IPv4 name server address (WithNameServers). It reads no process-wide configuration and binds no socket: see Serve.
 func NewXip(opts ...Option) (*Xip, error) {
 	xip := &Xip{
-		records:         initialRecords(),
 		logger:          utils.Logger,
 		challengeValues: make(map[string]struct{}),
 	}
@@ -565,21 +265,47 @@ func NewXip(opts ...Option) (*Xip, error) {
 	if len(xip.nameServerAddresses) == 0 {
 		return nil, errors.New("xip: at least one name server is required")
 	}
-	for _, ns := range xip.nameServerAddresses {
-		if addr, err := netip.ParseAddr(ns); err != nil || !addr.Is4() {
+	addresses := make([]netip.Addr, len(xip.nameServerAddresses))
+	for i, ns := range xip.nameServerAddresses {
+		addr, err := netip.ParseAddr(ns)
+		if err != nil || !addr.Is4() {
 			return nil, fmt.Errorf("xip: name server %q is not an IPv4 address", ns)
 		}
+		addresses[i] = addr
 	}
-	xip.initNameServers()
 
+	var file *zoneFile
 	if xip.zoneFile != "" {
-		if err := xip.loadZoneFile(); err != nil {
+		f, err := os.Open(xip.zoneFile)
+		if err != nil {
+			return nil, fmt.Errorf("opening zone file %s: %w", xip.zoneFile, err)
+		}
+		defer f.Close()
+		file, err = parseZoneFile(f, xip.zoneFile, zoneServer{
+			origin:        domain,
+			nameServers:   nameServerNames(domain+".", len(addresses)),
+			challengeName: xip.challengeName,
+			addresses:     addresses,
+		})
+		if err != nil {
 			return nil, err
 		}
 	}
 
-	xip.mux = dns.NewServeMux()
-	xip.mux.HandleFunc(domain+".", xip.handleDnsRequest)
+	zone, err := newZone(domain, xip.email, addresses, file)
+	if err != nil {
+		return nil, err
+	}
+	xip.zone = zone
 
+	if file != nil {
+		cuts := file.cuts.sortedCuts()
+		xip.logger.Info().
+			Str("zone_file", xip.zoneFile).
+			Int("delegations", len(cuts)).
+			Strs("cuts", cuts).
+			Int("records", len(file.records)).
+			Msg("Loaded zone file")
+	}
 	return xip, nil
 }

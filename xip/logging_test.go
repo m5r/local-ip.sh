@@ -101,8 +101,11 @@ func TestHandleDnsRequestLogsNothingAtInfo(t *testing.T) {
 		rcode int
 	}{
 		{"matching A", newQuery("10-11-12-13.logging-info.test.", dns.TypeA), dns.RcodeSuccess},
-		{"non-matching A", newQuery("nope.logging-info.test.", dns.TypeA), dns.RcodeNameError},
-		{"opcode other than QUERY", notify, dns.RcodeRefused},
+		// A name that owns nothing may still have names below it, so it gets NODATA, where it used to get NXDOMAIN.
+		{"non-matching A is NODATA", newQuery("nope.logging-info.test.", dns.TypeA), dns.RcodeSuccess},
+		{"name too long to have a child is NXDOMAIN", newQuery(nameOfWireLength(t, 254, "logging-info.test."), dns.TypeA), dns.RcodeNameError},
+		// The server does not implement NOTIFY (RFC 1996 section 3.12), where it used to answer REFUSED.
+		{"opcode other than QUERY is NOTIMP", notify, dns.RcodeNotImplemented},
 	}
 	var buf bytes.Buffer
 	xip := newLoggingXip(t, "logging-info.test", zerolog.InfoLevel, &buf)
@@ -143,16 +146,27 @@ func TestHandleDnsRequestLogsResolvedAtDebug(t *testing.T) {
 			wantAnswers: []string{"10.11.12.13"},
 		},
 		{
-			name:        "non-matching A",
+			// A name that owns nothing may still have names below it, so it gets NODATA, where it used to get NXDOMAIN.
+			name:        "non-matching A is NODATA",
 			query:       newQuery("nope.logging-debug.test.", dns.TypeA),
+			wantType:    "A",
+			wantRcode:   "NOERROR",
+			wantAnswers: []string{},
+		},
+		{
+			name:        "name too long to have a child is NXDOMAIN",
+			query:       newQuery(nameOfWireLength(t, 255, "logging-debug.test."), dns.TypeA),
 			wantType:    "A",
 			wantRcode:   "NXDOMAIN",
 			wantAnswers: []string{},
 		},
 		{
-			name:     "unassigned type at the apex",
-			query:    newQuery("logging-debug.test.", 65280),
-			wantType: "TYPE65280",
+			// An unknown type gets the answer of a known type without data (RFC 8906 section 3.1.2), where it used to get an SOA record in the answer.
+			name:        "unassigned type at the apex is NODATA",
+			query:       newQuery("logging-debug.test.", 65280),
+			wantType:    "TYPE65280",
+			wantRcode:   "NOERROR",
+			wantAnswers: []string{},
 		},
 	}
 	var buf bytes.Buffer

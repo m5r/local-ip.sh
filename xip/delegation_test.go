@@ -52,19 +52,10 @@ func expectReferral(t *testing.T, resp *dns.Msg) {
 	}
 }
 
-func expectNotReferral(t *testing.T, resp *dns.Msg) {
+// expectNoDataAtExampleTest checks the NODATA form of B4 for the zone example.test, the answer a DS query at a cut gets now that it is answered from this zone, which has no DS records.
+func expectNoDataAtExampleTest(t *testing.T, resp *dns.Msg) {
 	t.Helper()
-	if !resp.Authoritative {
-		t.Error("AA flag is clear, want it set outside a referral")
-	}
-	for _, rr := range resp.Ns {
-		if rr.Header().Rrtype == dns.TypeNS {
-			t.Errorf("authority section contains the NS record %q", rr)
-		}
-	}
-	if t.Failed() {
-		t.Logf("response:\n%s", resp)
-	}
+	expectNoData(t, resp, "example.test.", 300)
 }
 
 func expectDashedAnswer(t *testing.T, resp *dns.Msg) {
@@ -113,10 +104,10 @@ ns1.sub AAAA 2001:db8::1
 		{name: "glue name A", qname: "ns1.sub.example.test.", qtype: dns.TypeA, expect: expectReferral},
 		{name: "glue name AAAA", qname: "ns1.sub.example.test.", qtype: dns.TypeAAAA, expect: expectReferral},
 		{name: "mixed-case cut NS", qname: "SuB.ExAmPlE.TeSt.", qtype: dns.TypeNS, expect: expectReferral},
-		{name: "DS at the cut", qname: "sub.example.test.", qtype: dns.TypeDS, expect: expectNotReferral},
-		{name: "mixed-case DS at the cut", qname: "SuB.ExAmPlE.TeSt.", qtype: dns.TypeDS, expect: expectNotReferral},
+		{name: "DS at the cut is the zone's NODATA", qname: "sub.example.test.", qtype: dns.TypeDS, expect: expectNoDataAtExampleTest},
+		{name: "mixed-case DS at the cut is the zone's NODATA", qname: "SuB.ExAmPlE.TeSt.", qtype: dns.TypeDS, expect: expectNoDataAtExampleTest},
 		{name: "dashed address outside the cut", qname: "10-0-0-1.example.test.", qtype: dns.TypeA, expect: expectDashedAnswer},
-		{name: "sibling sharing a suffix", qname: "xsub.example.test.", qtype: dns.TypeA, expect: expectNotReferral},
+		{name: "sibling sharing a suffix is the zone's NODATA, not a referral", qname: "xsub.example.test.", qtype: dns.TypeA, expect: expectNoDataAtExampleTest},
 	}
 
 	for _, tt := range tests {
@@ -141,7 +132,7 @@ func TestNewXipRejectsBadZoneFile(t *testing.T) {
 		},
 		{
 			name:     "invalid file",
-			zoneFile: func(t *testing.T) string { return writeZoneFile(t, "sub TXT \"not a delegation\"\n") },
+			zoneFile: func(t *testing.T) string { return writeZoneFile(t, "sub PTR other.test.\n") },
 		},
 	}
 
@@ -177,7 +168,8 @@ func TestNewXipWithoutZoneFile(t *testing.T) {
 	expectDashedAnswer(t, queryTestServer(t, address, "10-0-0-1.sub.no-zone-file.test.", dns.TypeA))
 }
 
-func TestFailedNewXipKeepsExistingRegistration(t *testing.T) {
+// TestFailedNewXipLeavesRunningInstanceAnswering shows that building an instance touches nothing an instance already serving the same domain answers from.
+func TestFailedNewXipLeavesRunningInstanceAnswering(t *testing.T) {
 	const domain = "kept-registration.test"
 	address := startTestServer(t,
 		WithDomain(domain),
@@ -240,9 +232,8 @@ func TestConcurrentReferrals(t *testing.T) {
 	}
 }
 
-// TestReferralDoesNotShareStoredSlices guards the stored delegation: a response that shared its
-// backing arrays would let any later append to the response write into them.
-func TestReferralDoesNotShareStoredSlices(t *testing.T) {
+// TestReferralDoesNotShareStoredRecords guards the stored delegation: replies are packed concurrently, so a reply that held a stored record or shared a backing array with the stored slices could let one reply change what another sends.
+func TestReferralDoesNotShareStoredRecords(t *testing.T) {
 	xip, err := NewXip(
 		WithDomain("shared-slices.test"),
 		WithEmail("admin@shared-slices.test"),
@@ -252,22 +243,20 @@ func TestReferralDoesNotShareStoredSlices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored := xip.delegations.cuts["sub.shared-slices.test."]
+	stored := xip.zone.cuts.cuts["sub.shared-slices.test."]
 
-	query := new(dns.Msg)
-	query.SetQuestion("www.sub.shared-slices.test.", dns.TypeA)
-	message := new(dns.Msg)
-	message.SetReply(query)
-	xip.handleQuery(message)
+	writer := &recordingWriter{}
+	xip.handleDnsRequest(writer, newQuery("www.sub.shared-slices.test.", dns.TypeA))
+	message := writer.written
 
-	if len(message.Ns) != 1 || len(message.Extra) != 1 {
+	if message == nil || len(message.Ns) != 1 || len(message.Extra) != 1 {
 		t.Fatalf("not the expected referral:\n%s", message)
 	}
-	if &message.Ns[0] == &stored.nameServers[0] {
-		t.Error("the authority section shares its backing array with the stored name servers")
+	if &message.Ns[0] == &stored.nameServers[0] || message.Ns[0] == stored.nameServers[0] {
+		t.Error("the authority section shares the stored name server record or its backing array")
 	}
-	if &message.Extra[0] == &stored.glue[0] {
-		t.Error("the additional section shares its backing array with the stored glue")
+	if &message.Extra[0] == &stored.glue[0] || message.Extra[0] == stored.glue[0] {
+		t.Error("the additional section shares the stored glue record or its backing array")
 	}
 }
 

@@ -40,7 +40,7 @@ local-ip.sh can be configured through environment variables or CLI flags
 - `XIP_NAMESERVERS` or `--nameservers` required, comma-separated IPv4 addresses used to answer `A` queries for `nsX.{domain}` where `X` is the index of the address in this list. For example setting `--domain example.com --nameservers 1.2.3.4,9.8.7.6` will answer `1.2.3.4` for `ns1.example.com` and `9.8.7.6` for `ns2.example.com`. All `nsX.{domain}` nameservers will be in the answer for NS queries to the zone.
 - `XIP_STATE_DIR` or `--state-dir` optional, directory where the ACME account and the certificates are stored, defaults to `./state`.
 - `XIP_ACME_PROFILE` or `--acme-profile` optional, ACME certificate profile to request, for example `shortlived` for Let's Encrypt's 160-hour certificates, defaults to none, which lets the certificate authority choose.
-- `XIP_ZONE_FILE` or `--zone-file` optional, path to a zone file in RFC 1035 syntax declaring delegations of subdomains to other name servers. Names are relative to the domain and the default TTL is 300 seconds. Only NS records below the apex and A/AAAA glue records for their name servers are accepted. A delegated name server must be inside the delegated subdomain, with glue, or outside the domain entirely. Glue addresses must not be this server's own nameserver addresses. Anything else stops the server at startup with an error naming the file and the record.
+- `XIP_ZONE_FILE` or `--zone-file` optional, path to a zone file in RFC 1035 syntax declaring delegations of subdomains to other name servers and records the server answers itself. Names are relative to the domain; a record without a TTL takes the one set by `$TTL` or, as usual in zone files, the TTL of the record before it, and 300 seconds when neither exists. Delegations are NS records below the apex with A/AAAA glue records for their name servers: a delegated name server must be inside the delegated subdomain, with glue, or outside the domain entirely, glue addresses must not be this server's own nameserver addresses, and nothing else may be declared at or below a delegated name. Records are A, AAAA, CAA, CNAME, MX, SRV and TXT records at the domain or below it, with these restrictions: none at the `nsX` names, at `_acme-challenge` or at a name that carries an address, no A or CNAME record at the domain itself, a CNAME record alone at its name and pointing outside the domain, an MX or SRV target inside the domain and outside every delegated subdomain must have an address and no CNAME record, and every answer must fit in 512 octets. Anything else stops the server at startup with an error naming the file and the record.
 - `XIP_LOG_LEVEL` or `--log-level` optional, `trace`, `debug`, `info`, `warn` or `error`, defaults to `info`.
 - `XIP_LOG_FORMAT` or `--log-format` optional, `auto`, `json` or `console`, defaults to `auto`, which is `console` on a terminal and `json` otherwise.
 - `XIP_LOG_FILE` or `--log-file` optional, also append logs as JSON to this file, rotated at 1 MB inside its directory, which must stay writable. No file is written by default.
@@ -72,6 +72,19 @@ For any query at or below `sub.example.com`, whatever its type, the server answe
 
 A delegation takes every name at or below the label away from the server, including names that carry an address: with the zone file above, `10-0-0-1.sub.example.com` gets the referral, not `10.0.0.1`. Only delegate labels you have set aside for the purpose. On the hosted instance, labels directly below `local-ip.sh` that start with `xip-` are reserved for the project: `xip-staging.local-ip.sh` is delegated to its test instance, and names under a reserved label are not part of the service.
 
+### Records
+
+With `--domain example.com`, this zone file sends the domain's mail elsewhere and points a name at another host:
+
+```
+; zone file for example.com, names are relative to the domain
+@     MX     10 mail.example.net.
+@     TXT    "v=spf1 include:example.net ~all"
+www   CNAME  site.example.net.
+```
+
+The server answers by itself for the domain's SOA, NS and A records, for the addresses of its name servers, and for the address of every name that carries one. A query for another type at an alias such as `www` gets its CNAME record; any other name without the records asked for gets an empty answer with the domain's SOA record in the authority section, and never NXDOMAIN unless it is too long to have any name below it. A query for `ANY` at a name with records gets the HINFO record of RFC 8482 instead of the records, or the CNAME record at an alias. There are no zone transfers.
+
 A [reference docker compose file](./compose.yml) is available for deployments using Docker.
 
 ## Testing
@@ -81,7 +94,7 @@ A [reference docker compose file](./compose.yml) is available for deployments us
 - `make e2e FLY_CONFIG=fly.toml` runs the same suite against production.
 - `make e2e-lifecycle` asks the staging deployment for a certificate renewal through the Fly Machines API and checks that both certificates change while DNS keeps answering, then restarts the machine and checks that the same certificates are served again. It needs `FLY_API_TOKEN`, preferably a token limited to the staging app (`fly tokens create deploy -a local-ip-staging -x 1h` prints one), and it refuses every deployment other than the staging one.
 
-The live suite reads the zone, nameserver addresses, admin email and certificate authority from the Fly config file. It only reads from the target: it sends DNS queries to each nameserver and HTTP GET requests to the website, including the published wildcard certificate and key, which it keeps in memory. It also queries the public resolvers `1.1.1.1`, `8.8.8.8` and `9.9.9.10`, all of which must answer. DNS queries that get no response are retried with growing pauses, and every lost attempt is reported in the test output. When the Fly config sets `XIP_ZONE_FILE`, the suite reads the zone file delivered through the matching `[[files]]` entry and checks that every nameserver answers queries at and below each delegated name with a referral to the declared name servers and glue.
+The live suite reads the zone, nameserver addresses, admin email and certificate authority from the Fly config file. It only reads from the target: it sends DNS queries to each nameserver and HTTP GET requests to the website, including the published wildcard certificate and key, which it keeps in memory. It also queries the public resolvers `1.1.1.1`, `8.8.8.8` and `9.9.9.10`, all of which must answer. DNS queries that get no response are retried with growing pauses, and every lost attempt is reported in the test output. When the Fly config sets `XIP_ZONE_FILE`, the suite reads the zone file delivered through the matching `[[files]]` entry and checks that every nameserver answers queries at and below each delegated name with a referral to the declared name servers and glue, and answers every record set the file declares outside its delegations with exactly the declared records. The suite refuses a target whose zone file declares a record at, or delegates, one of the names it probes, and names the name and the declaration.
 
 Prerequisites for the live suite: Go, outbound IPv4 UDP port 53, TCP port 80 and TCP port 443, and the ability to listen on a loopback port.
 

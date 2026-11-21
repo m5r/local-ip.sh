@@ -1,5 +1,16 @@
 ; Zone file of the staging instance, origin xip-staging.local-ip.sh.
+; The default TTL is stated so that the TTL written on one record does not become the default of the records after it.
+$TTL 300
 ; This delegation exists only so the e2e suite can verify referrals on staging.
 ; 192.0.2.53 is a documentation address (RFC 5737) where nothing answers.
 e2e-delegated      NS  ns1.e2e-delegated
 ns1.e2e-delegated  A   192.0.2.53
+; Records that exist only so the e2e suite can verify each supported type on staging; e2e-alias has a TTL of its own so that the suite sees a declared TTL served.
+e2e-records       A      192.0.2.10
+e2e-records       AAAA   2001:db8::10
+e2e-records       TXT    "local-ip.sh e2e" "second string"
+e2e-records       MX     10 mail.example.net.
+e2e-records       CAA    0 issue ";"
+e2e-alias    600  CNAME  target.example.net.
+_e2e._tcp         SRV    0 0 443 target.example.net.
+@                 TXT    "local-ip.sh test instance"

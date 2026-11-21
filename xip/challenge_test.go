@@ -192,7 +192,14 @@ func TestChallengeRecords(t *testing.T) {
 		expectEmptyChallengeAnswer(t, queryTestServer(t, address, challengeTestName, dns.TypeTXT))
 	})
 
-	t.Run("another TXT name with records is unchanged", func(t *testing.T) {
+	// The negative answer used to carry an SOA record owned by the question name; it is now the NODATA of B4, owned by the apex.
+	t.Run("TXT names without records get the zone's NODATA", func(t *testing.T) {
+		for _, qname := range []string{"local-ip.sh.", "nope.local-ip.sh."} {
+			expectNoData(t, queryTestServer(t, address, qname, dns.TypeTXT), challengeTestDomain+".", 300)
+		}
+	})
+
+	t.Run("ANY with a value published is the HINFO record with TTL 0", func(t *testing.T) {
 		if err := xip.AddChallenge(challengeTestName, first); err != nil {
 			t.Fatalf("AddChallenge: %v", err)
 		}
@@ -201,25 +208,15 @@ func TestChallengeRecords(t *testing.T) {
 				t.Errorf("RemoveChallenge: %v", err)
 			}
 		})
-		resp := queryTestServer(t, address, "_dmarc.local-ip.sh.", dns.TypeTXT)
-		want := rrStrings(t, `_dmarc.local-ip.sh. 300 IN TXT "v=DMARC1; p=none; rua=mailto:postmaster@local-ip.sh; ruf=mailto:admin@local-ip.sh"`)
+		resp := queryTestServer(t, address, challengeTestName, dns.TypeANY)
+		want := rrStrings(t, challengeTestName+` 0 IN HINFO "RFC8482" ""`)
 		if resp.Rcode != dns.RcodeSuccess || !resp.Authoritative || !slices.Equal(stringsOf(resp.Answer), want) || len(resp.Ns) != 0 {
 			t.Errorf("want NOERROR, AA and answer %q, received:\n%s", want, resp)
 		}
 	})
 
-	t.Run("TXT names without records keep the existing negative answer", func(t *testing.T) {
-		for _, qname := range []string{"local-ip.sh.", "nope.local-ip.sh."} {
-			resp := queryTestServer(t, address, qname, dns.TypeTXT)
-			if resp.Rcode != dns.RcodeSuccess || !resp.Authoritative || len(resp.Answer) != 0 || len(resp.Ns) != 1 {
-				t.Errorf("%s: want NOERROR, AA, no answer and one SOA, received:\n%s", qname, resp)
-				continue
-			}
-			soa, ok := resp.Ns[0].(*dns.SOA)
-			if !ok || soa.Hdr.Name != qname || soa.Hdr.Ttl != 300 {
-				t.Errorf("%s: authority = %q, want an SOA owned by the question name with TTL 300", qname, resp.Ns[0])
-			}
-		}
+	t.Run("ANY without a value published is NODATA with TTL 0", func(t *testing.T) {
+		expectEmptyChallengeAnswer(t, queryTestServer(t, address, challengeTestName, dns.TypeANY))
 	})
 }
 

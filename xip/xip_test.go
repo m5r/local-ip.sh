@@ -10,66 +10,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestResolveDashUnit(t *testing.T) {
-	xip, err := NewXip(
-		WithDomain("local-ip.sh"),
-		WithEmail("admin@local-ip.sh"),
-		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	A := xip.fqdnToA("192-168-1-29.local-ip.sh")
-	expected := "192.168.1.29"
-	received := A[0].A.String()
-	if received != expected {
-		t.Fatalf("Expected %s but received %s", expected, received)
-	}
-
-	A = xip.fqdnToA("192.168.1.29.local-ip.sh")
-	expected = "192.168.1.29"
-	received = A[0].A.String()
-	if received != expected {
-		t.Fatalf("Expected %s but received %s", expected, received)
-	}
-
-	A = xip.fqdnToA("prefixed.192.168.1.29.local-ip.sh")
-	expected = "192.168.1.29"
-	received = A[0].A.String()
-	if received != expected {
-		t.Fatalf("Expected %s but received %s", expected, received)
-	}
-
-	A = xip.fqdnToA("prefixed-192.168.1.29.local-ip.sh")
-	if A != nil {
-		t.Fatalf("Expected %v but received %s", nil, A)
-	}
-}
-
-func TestResolveLabelsAfterAddress(t *testing.T) {
-	xip, err := NewXip(
-		WithDomain("local-ip.sh"),
-		WithEmail("admin@local-ip.sh"),
-		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, name := range []string{"192-168-1-29.app.local-ip.sh", "192.168.1.29.app.local-ip.sh"} {
-		t.Run(name, func(t *testing.T) {
-			records := xip.fqdnToA(name)
-			if len(records) != 1 {
-				t.Fatalf("got %d A records, want 1: %v", len(records), records)
-			}
-			if got, want := records[0].A.String(), "192.168.1.29"; got != want {
-				t.Errorf("A = %s, want %s", got, want)
-			}
-		})
-	}
-}
-
 func TestConstructor(t *testing.T) {
 	xip, err := NewXip(
 		WithDomain("local-ip.sh"),
@@ -80,11 +20,9 @@ func TestConstructor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if xip.nameServers[0] != "ns1.local-ip.sh." {
-		t.Errorf("expected ns1.local-ip.sh., got %s", xip.nameServers[0])
-	}
-	if xip.nameServers[1] != "ns2.local-ip.sh." {
-		t.Errorf("expected ns2.local-ip.sh., got %s", xip.nameServers[1])
+	want := []string{"ns1.local-ip.sh.", "ns2.local-ip.sh."}
+	if !slices.Equal(xip.zone.nameServers, want) {
+		t.Errorf("name servers = %q, want %q", xip.zone.nameServers, want)
 	}
 }
 
@@ -160,47 +98,37 @@ func queryTestServer(t *testing.T, address string, name string, qtype uint16) *d
 	return resp
 }
 
+// TestInstanceIsolation shows that each instance answers from its own zone: its own name server address, and a refusal for the other instance's names.
 func TestInstanceIsolation(t *testing.T) {
-	xip1, err := NewXip(
-		WithDomain("one.test"),
-		WithEmail("admin@one.test"),
-		WithNameServers([]string{"1.1.1.1"}),
-	)
-	if err != nil {
-		t.Fatal(err)
+	instances := []struct {
+		domain, other, address string
+	}{
+		{domain: "one.test", other: "two.test", address: "1.1.1.1"},
+		{domain: "two.test", other: "one.test", address: "2.2.2.2"},
 	}
-	xip2, err := NewXip(
-		WithDomain("two.test"),
-		WithEmail("admin@two.test"),
-		WithNameServers([]string{"2.2.2.2"}),
-	)
-	if err != nil {
-		t.Fatal(err)
+	servers := make([]string, len(instances))
+	for i, instance := range instances {
+		servers[i] = startTestServer(t,
+			WithDomain(instance.domain),
+			WithEmail("admin@"+instance.domain),
+			WithNameServers([]string{instance.address}),
+		)
 	}
 
-	if xip1.records == nil || xip2.records == nil {
-		t.Fatal("records not initialized")
-	}
-
-	if len(xip1.nameServers) != 1 || xip1.nameServers[0] != "ns1.one.test." {
-		t.Errorf("xip1 nameservers incorrect: %v", xip1.nameServers)
-	}
-	if len(xip2.nameServers) != 1 || xip2.nameServers[0] != "ns1.two.test." {
-		t.Errorf("xip2 nameservers incorrect: %v", xip2.nameServers)
-	}
-
-	if _, ok := xip1.records["ns1.one.test."]; !ok {
-		t.Error("xip1 missing ns1.one.test. record")
-	}
-	if _, ok := xip2.records["ns1.two.test."]; !ok {
-		t.Error("xip2 missing ns1.two.test. record")
-	}
-
-	if _, ok := xip1.records["ns1.two.test."]; ok {
-		t.Error("xip1 should not have xip2's records")
-	}
-	if _, ok := xip2.records["ns1.one.test."]; ok {
-		t.Error("xip2 should not have xip1's records")
+	for i, instance := range instances {
+		t.Run(instance.domain+" answers for its own name server", func(t *testing.T) {
+			resp := queryTestServer(t, servers[i], "ns1."+instance.domain+".", dns.TypeA)
+			want := rrStrings(t, "ns1."+instance.domain+". 300 IN A "+instance.address)
+			if resp.Rcode != dns.RcodeSuccess || !slices.Equal(stringsOf(resp.Answer), want) {
+				t.Errorf("want NOERROR and %q, received:\n%s", want, resp)
+			}
+		})
+		t.Run(instance.domain+" refuses the names of "+instance.other, func(t *testing.T) {
+			resp := queryTestServer(t, servers[i], "ns1."+instance.other+".", dns.TypeA)
+			if resp.Rcode != dns.RcodeRefused || len(resp.Answer) != 0 {
+				t.Errorf("want REFUSED without answer, received:\n%s", resp)
+			}
+		})
 	}
 }
 
