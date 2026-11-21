@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 
 WORKDIR /app
 COPY . .
@@ -13,7 +13,7 @@ WORKDIR /local-ip
 COPY --from=build /app/local-ip.sh /local-ip/local-ip.sh
 COPY --from=build /app/http/static /local-ip/http/static
 
-VOLUME /local-ip/.lego
+VOLUME /local-ip/state
 
 #      DNS    HTTP   HTTPS
 EXPOSE 53/udp 80/tcp 443/tcp

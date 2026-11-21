@@ -14,10 +14,13 @@ XIP_EMAIL = "admin@local-ip.sh"
 XIP_ZONE_FILE = "/etc/local-ip.zone"
 XIP_NAMESERVERS = "149.248.203.129"
 XIP_STAGING = "true"
+# 160-hour certificates: this instance renews by itself about every three days, which keeps exercising unattended renewal against a real certificate authority.
+XIP_ACME_PROFILE = "shortlived"
 
 [mounts]
+# The volume keeps the name it was created with, when lego managed the certificates.
 source = "lego"
-destination = "/local-ip/.lego"
+destination = "/local-ip/state"
 
 [[files]]
 guest_path = "/etc/local-ip.zone"

@@ -3,7 +3,7 @@ services:
         image: local-ip.sh
         build: .
         volumes:
-            - lego:/local-ip/.lego
+            - state:/local-ip/state
         restart: unless-stopped
         environment:
             XIP_DOMAIN: "local-ip.sh"
@@ -16,4 +16,4 @@ services:
             - 443:443/tcp
 
 volumes:
-    lego:
+    state:

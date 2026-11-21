@@ -54,8 +54,6 @@ type discardWriter struct{ recordingWriter }
 
 func (discardWriter) WriteMsg(*dns.Msg) error { return nil }
 
-// newLoggingXip registers its handler on the process-wide mux like every NewXip, so each caller
-// passes a domain no other test uses.
 func newLoggingXip(tb testing.TB, domain string, level zerolog.Level, out io.Writer) *Xip {
 	tb.Helper()
 	xip, err := NewXip(
@@ -67,7 +65,6 @@ func newLoggingXip(tb testing.TB, domain string, level zerolog.Level, out io.Wri
 	if err != nil {
 		tb.Fatalf("NewXip: %v", err)
 	}
-	tb.Cleanup(func() { dns.HandleRemove(dns.Fqdn(domain)) })
 	return xip
 }
 

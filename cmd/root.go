@@ -1,28 +1,27 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"net/mail"
-	"net/url"
+	"net"
+	"os"
+	"os/signal"
+	"strconv"
 	"strings"
-	"time"
+	"syscall"
 
-	"github.com/asaskevich/govalidator"
-	"github.com/go-acme/lego/v4/lego"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"local-ip.sh/app"
 	"local-ip.sh/certs"
-	"local-ip.sh/http"
 	"local-ip.sh/utils"
-	"local-ip.sh/xip"
 )
 
 var command = &cobra.Command{
 	Use: "local-ip.sh",
-	PreRun: func(cmd *cobra.Command, args []string) {
-		viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-		viper.SetEnvPrefix("XIP")
-		viper.AutomaticEnv()
+	Run: func(cmd *cobra.Command, args []string) {
+		loadEnvironment()
 
 		err := utils.InitLogger(utils.LogOptions{
 			Level:  viper.GetString("log-level"),
@@ -33,103 +32,161 @@ var command = &cobra.Command{
 			utils.Logger.Fatal().Err(err).Msg("Invalid logging configuration")
 		}
 
-		email := viper.GetString("Email")
-		_, err = mail.ParseAddress(email)
+		cfg, err := config()
 		if err != nil {
-			utils.Logger.Fatal().Err(err).Msg("Invalid email address")
+			utils.Logger.Fatal().Err(err).Msg("Invalid configuration")
 		}
-
-		domain := viper.GetString("Domain")
-		if !govalidator.IsDNSName(domain) {
-			utils.Logger.Fatal().Err(err).Msg("Invalid domain")
-		}
-
-		nameservers := strings.Split(viper.GetString("nameservers"), ",")
-		for _, ns := range nameservers {
-			if !govalidator.IsIPv4(ns) {
-				utils.Logger.Fatal().Err(err).Str("ns", ns).Msg("Invalid name server")
-			}
-		}
-		viper.Set("NameServers", nameservers)
-
-		staging := viper.GetBool("staging")
-		var caDir string
-		if staging {
-			caDir = lego.LEDirectoryStaging
-		} else {
-			caDir = lego.LEDirectoryProduction
-		}
-		viper.Set("CADirURL", caDir)
-
-		parsedCaDirUrl, _ := url.Parse(caDir)
-		caDirHostname := parsedCaDirUrl.Hostname()
-		viper.Set("AccountFilePath", fmt.Sprintf("./.lego/accounts/%s/%s/account.json", caDirHostname, email))
-		viper.Set("KeyFilePath", fmt.Sprintf("./.lego/accounts/%s/%s/keys/%s.key", caDirHostname, email, email))
-
-		utils.InitConfig()
-	},
-	Run: func(cmd *cobra.Command, args []string) {
-		n, err := xip.NewXip()
+		a, err := app.New(cfg)
 		if err != nil {
-			utils.Logger.Fatal().Err(err).Msg("Failed to set up the DNS server")
+			utils.Logger.Fatal().Err(err).Msg("Failed to start")
 		}
 
-		go func() {
-			// try to obtain certificates once the DNS server is accepting requests
-			account := certs.LoadAccount()
-			certsClient := certs.NewCertsClient(n, account)
+		ctx, stop := shutdownContext()
+		defer stop()
+		onRenewSignal(ctx, utils.Logger, a.RenewCertificates)
 
-			time.Sleep(5 * time.Second)
-			certsClient.RequestCertificates()
-
-			for {
-				// afterwards, try to renew certificates once a day
-				time.Sleep(24 * time.Hour)
-				certsClient.RequestCertificates()
-			}
-		}()
-
-		go http.ServeHttp()
-
-		n.StartServer()
+		if err := a.Run(ctx); err != nil {
+			utils.Logger.Fatal().Err(err).Msg("Stopped")
+		}
+		utils.Logger.Info().Msg("Shut down")
 	},
 }
 
+// loadEnvironment makes every option readable from an environment variable: XIP_ followed by the flag's name in upper case, with "-" turned into "_".
+func loadEnvironment() {
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	viper.SetEnvPrefix("XIP")
+	viper.AutomaticEnv()
+}
+
+// shutdownContext is cancelled by the first SIGINT or SIGTERM.
+func shutdownContext() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Once the first signal has started the shutdown, the registration is released so that a second signal has its default effect and ends the process at once, should the shutdown hang.
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
+}
+
+// config turns the options into an app.Config. It parses each option into its type and fails on a value that does not parse; what a value means (a valid domain, email or name server) is checked by the packages that depend on it.
+func config() (app.Config, error) {
+	// Fly only delivers UDP to a socket bound to fly-global-services.
+	dnsHost := ""
+	if os.Getenv("FLY_APP_NAME") != "" {
+		dnsHost = "fly-global-services"
+	}
+
+	staging, err := boolOption("staging")
+	if err != nil {
+		return app.Config{}, err
+	}
+	directoryURL := certs.LetsEncryptProduction
+	if staging {
+		directoryURL = certs.LetsEncryptStaging
+	}
+
+	ports := map[string]string{}
+	for _, name := range []string{"dns-port", "http-port", "https-port"} {
+		port, err := portOption(name)
+		if err != nil {
+			return app.Config{}, err
+		}
+		ports[name] = port
+	}
+
+	var nameServers []string
+	if list := viper.GetString("nameservers"); list != "" {
+		nameServers = strings.Split(list, ",")
+	}
+
+	return app.Config{
+		Domain:       viper.GetString("domain"),
+		Email:        viper.GetString("email"),
+		NameServers:  nameServers,
+		ZoneFile:     viper.GetString("zone-file"),
+		DNSAddress:   net.JoinHostPort(dnsHost, ports["dns-port"]),
+		HTTPAddress:  ":" + ports["http-port"],
+		HTTPSAddress: ":" + ports["https-port"],
+		StateDir:     viper.GetString("state-dir"),
+		StaticDir:    "./http/static",
+		DirectoryURL: directoryURL,
+		ACMEProfile:  viper.GetString("acme-profile"),
+		Logger:       utils.Logger,
+	}, nil
+}
+
+// boolOption parses the effective text of a boolean option, whether it comes from the flag, the environment or the default.
+func boolOption(name string) (bool, error) {
+	text := viper.GetString(name)
+	value, err := strconv.ParseBool(text)
+	if err != nil {
+		return false, invalidOption(name, text, err)
+	}
+	return value, nil
+}
+
+// portOption parses the effective text of a port option, from the flag or the environment alike, as a decimal number from 0 to 65535: a leading zero is decimal (010 is port 10), and neither a base prefix nor a service name such as "ssh", which net.Listen would take, is accepted. The port flags are strings so that this is the only parser.
+func portOption(name string) (string, error) {
+	text := viper.GetString(name)
+	port, err := strconv.ParseUint(text, 10, 16)
+	if err != nil {
+		return "", invalidOption(name, text, err)
+	}
+	return strconv.FormatUint(port, 10), nil
+}
+
+// invalidOption names the option in both of its spellings.
+func invalidOption(name, text string, err error) error {
+	return fmt.Errorf("invalid value %q for --%s / XIP_%s: %w", text, name, strings.ToUpper(strings.ReplaceAll(name, "-", "_")), err)
+}
+
 func Execute() {
-	command.Flags().String("log-level", utils.DefaultLogLevel, "Log level: trace, debug, info, warn or error")
-	viper.BindPFlag("log-level", command.Flags().Lookup("log-level"))
-
-	command.Flags().String("log-format", utils.DefaultLogFormat, "Log format: auto, json or console (auto is console on a terminal, json otherwise)")
-	viper.BindPFlag("log-format", command.Flags().Lookup("log-format"))
-
-	command.Flags().String("log-file", "", "Path of an additional rotating log file (optional)")
-	viper.BindPFlag("log-file", command.Flags().Lookup("log-file"))
-
-	command.Flags().Uint("dns-port", 53, "Port for the DNS server")
-	viper.BindPFlag("dns-port", command.Flags().Lookup("dns-port"))
-
-	command.Flags().Uint("http-port", 80, "Port for the HTTP server")
-	viper.BindPFlag("http-port", command.Flags().Lookup("http-port"))
-
-	command.Flags().Uint("https-port", 443, "Port for the HTTPS server")
-	viper.BindPFlag("https-port", command.Flags().Lookup("https-port"))
-
-	command.Flags().Bool("staging", false, "Enable to use the Let's Encrypt staging environment to obtain certificates")
-	viper.BindPFlag("staging", command.Flags().Lookup("staging"))
-
-	command.Flags().String("domain", "", "Root domain (required)")
-	viper.BindPFlag("domain", command.Flags().Lookup("domain"))
-
-	command.Flags().String("email", "", "ACME account email address (required)")
-	viper.BindPFlag("email", command.Flags().Lookup("email"))
-
-	command.Flags().String("nameservers", "", "List of nameservers separated by commas (required)")
-	viper.BindPFlag("nameservers", command.Flags().Lookup("nameservers"))
-
-	command.Flags().String("zone-file", "", "Path to a zone file declaring delegations (optional)")
-	viper.BindPFlag("zone-file", command.Flags().Lookup("zone-file"))
+	defineFlags(command)
 
 	if err := command.Execute(); err != nil {
 		utils.Logger.Fatal().Err(err).Msg("Failed to run local-ip.sh")
 	}
+}
+
+// defineFlags declares the command line flags on cmd and binds each one to viper under its own name.
+func defineFlags(cmd *cobra.Command) {
+	flags := cmd.Flags()
+
+	flags.String("log-level", utils.DefaultLogLevel, "Log level: trace, debug, info, warn or error")
+	viper.BindPFlag("log-level", flags.Lookup("log-level"))
+
+	flags.String("log-format", utils.DefaultLogFormat, "Log format: auto, json or console (auto is console on a terminal, json otherwise)")
+	viper.BindPFlag("log-format", flags.Lookup("log-format"))
+
+	flags.String("log-file", "", "Path of an additional rotating log file (optional)")
+	viper.BindPFlag("log-file", flags.Lookup("log-file"))
+
+	flags.String("dns-port", "53", "Port for the DNS server")
+	viper.BindPFlag("dns-port", flags.Lookup("dns-port"))
+
+	flags.String("http-port", "80", "Port for the HTTP server")
+	viper.BindPFlag("http-port", flags.Lookup("http-port"))
+
+	flags.String("https-port", "443", "Port for the HTTPS server")
+	viper.BindPFlag("https-port", flags.Lookup("https-port"))
+
+	flags.Bool("staging", false, "Enable to use the Let's Encrypt staging environment to obtain certificates")
+	viper.BindPFlag("staging", flags.Lookup("staging"))
+
+	flags.String("domain", "", "Root domain (required)")
+	viper.BindPFlag("domain", flags.Lookup("domain"))
+
+	flags.String("email", "", "ACME account email address (required)")
+	viper.BindPFlag("email", flags.Lookup("email"))
+
+	flags.String("nameservers", "", "List of nameservers separated by commas (required)")
+	viper.BindPFlag("nameservers", flags.Lookup("nameservers"))
+
+	flags.String("zone-file", "", "Path to a zone file declaring delegations (optional)")
+	viper.BindPFlag("zone-file", flags.Lookup("zone-file"))
+
+	flags.String("state-dir", "./state", "Directory for the ACME account and the certificates")
+	viper.BindPFlag("state-dir", flags.Lookup("state-dir"))
+
+	flags.String("acme-profile", "", "ACME certificate profile to request (optional, the certificate authority chooses by default)")
+	viper.BindPFlag("acme-profile", flags.Lookup("acme-profile"))
 }

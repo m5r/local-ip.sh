@@ -10,9 +10,7 @@ local-ip.sh packs up:
  - a Let's Encrypt client that takes care of obtaining and renewing the wildcard certificate for `*.local-ip.sh` and the root certificate for `local-ip.sh` using the [DNS-01 challenge](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge)
  - an HTTP server that serves the website and the wildcard certificate files
 
-It answers queries with the IPv4 address it may find in the subdomain by pattern matching the FQDN.
-It registers an account to Let's Encrypt's ACME server to obtain the wildcard certificate on the first run and then renew it about a month before it expires. The account file and the associated key used to request a certificate under the `./.lego/accounts` directory and the certificate's files are stored in `./.lego/certs`.
-It also obtains a separate certificate for the root domain to serve the website through HTTPS. It initially serves the website through HTTP and when the root domain certificate is ready, it redirects all HTTP requests to HTTPS.
+It answers queries with the IPv4 address it may find in the subdomain by pattern matching the FQDN. It registers an account with Let's Encrypt on its first run and keeps two certificates: the wildcard certificate for `*.local-ip.sh`, whose private key is published, and a separate certificate for the root domain `local-ip.sh` that serves the website. The account and the certificates are stored in the state directory (`./state` by default). Each certificate is renewed when a third of its lifetime remains (half of it for a certificate valid less than 10 days), or earlier when Let's Encrypt asks for it. The website is served over HTTP until the root domain's certificate exists, and HTTP requests are redirected to HTTPS from then on.
 
 ## Usage
 
@@ -40,12 +38,24 @@ local-ip.sh can be configured through environment variables or CLI flags
 - `XIP_DOMAIN` or `--domain` required, domain name of the server hosting this. It will be used as the zone to answer dns queries for.
 - `XIP_EMAIL` or `--email` required, administrator's email address, used to create the ACME account to request certificates from Let's Encrypt and as the `RNAME` value of the SOA record representing the domain administrator's email address.
 - `XIP_NAMESERVERS` or `--nameservers` required, comma-separated IPv4 addresses used to answer `A` queries for `nsX.{domain}` where `X` is the index of the address in this list. For example setting `--domain example.com --nameservers 1.2.3.4,9.8.7.6` will answer `1.2.3.4` for `ns1.example.com` and `9.8.7.6` for `ns2.example.com`. All `nsX.{domain}` nameservers will be in the answer for NS queries to the zone.
+- `XIP_STATE_DIR` or `--state-dir` optional, directory where the ACME account and the certificates are stored, defaults to `./state`.
+- `XIP_ACME_PROFILE` or `--acme-profile` optional, ACME certificate profile to request, for example `shortlived` for Let's Encrypt's 160-hour certificates, defaults to none, which lets the certificate authority choose.
 - `XIP_ZONE_FILE` or `--zone-file` optional, path to a zone file in RFC 1035 syntax declaring delegations of subdomains to other name servers. Names are relative to the domain and the default TTL is 300 seconds. Only NS records below the apex and A/AAAA glue records for their name servers are accepted. A delegated name server must be inside the delegated subdomain, with glue, or outside the domain entirely. Glue addresses must not be this server's own nameserver addresses. Anything else stops the server at startup with an error naming the file and the record.
 - `XIP_LOG_LEVEL` or `--log-level` optional, `trace`, `debug`, `info`, `warn` or `error`, defaults to `info`.
 - `XIP_LOG_FORMAT` or `--log-format` optional, `auto`, `json` or `console`, defaults to `auto`, which is `console` on a terminal and `json` otherwise.
 - `XIP_LOG_FILE` or `--log-file` optional, also append logs as JSON to this file, rotated at 1 MB inside its directory, which must stay writable. No file is written by default.
 
-At `debug` and `trace` level the server logs each query it answers with the name that was asked for, which exposes the internal host names of the people using the instance and slows the server down; use these levels for troubleshooting only. These settings apply to the server's own log lines: the ACME library writes its own lines to standard error.
+At `debug` and `trace` level the server logs each query it answers with the name that was asked for, which exposes the internal host names of the people using the instance and slows the server down; use these levels for troubleshooting only. The ACME client's lines go through the same logger, with the field `component` set to `acme`.
+
+### Certificates
+
+A failed certificate order never stops the server: DNS keeps answering, the certificate in use stays in use, and the order is retried after 5 minutes, then at growing intervals up to 6 hours, never before the time the certificate authority asks to wait. Each failure is logged at `error` level with the certificate authority's explanation.
+
+The two certificates are ordered one after the other, and each challenge value is published for 75 seconds before validation is requested. On a first start the website therefore answers over HTTPS after about a minute and a half, and `/server.pem` and `/server.key` answer `503` for about three minutes.
+
+Sending `SIGUSR1` to the process renews both certificates now: `docker kill --signal=USR1 <container>`, or on Fly, `POST /v1/apps/<app>/machines/<id>/signal` with `{"signal": "SIGUSR1"}` on the Machines API.
+
+Upgrading from a version that kept its files in `./.lego`: those files are not read. The server registers a new account and orders both certificates on its first start, so HTTPS and the published certificate files are unavailable for the durations above, longer if Let's Encrypt cannot be reached or refuses. The volume has to be mounted at the state directory, and the old `accounts` and `certs` directories can be deleted once going back to the previous version is no longer wanted.
 
 ### Delegating a subdomain
 
@@ -81,4 +91,4 @@ I'm currently hosting [local-ip.sh](https://local-ip.sh) at [Fly.io](https://fly
 You will essentially need to:
  - set your domain's glue records to point to the IP addresses you will set for `XIP_NAMESERVERS` / `--nameservers`
  - configure `local-ip.sh` with the domain, admin email address, and nameservers
- - ensure you have some sort of persistent storage for the `./.lego` directory, this is where the ACME account and certificate files are stored, you don't want to lose this between deployments
+ - ensure you have some sort of persistent storage for the state directory (`./state`, `/local-ip/state` in the Docker image), this is where the ACME account and certificate files are stored, you don't want to lose this between deployments

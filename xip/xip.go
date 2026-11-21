@@ -1,8 +1,11 @@
 package xip
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/netip"
 	"os"
 	"regexp"
@@ -13,20 +16,27 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
+	"local-ip.sh/internal/names"
 	"local-ip.sh/utils"
 )
 
+// shutdownTimeout bounds how long Serve waits for the handlers in flight once its context is cancelled.
+const shutdownTimeout = 2 * time.Second
+
 type Xip struct {
-	server      dns.Server
-	nameServers []string
-	domain      string
-	email       string
-	dnsPort     uint
-	recordsMu   sync.RWMutex
-	records     map[string]hardcodedRecord
-	zoneFile    string
-	delegations *zoneCuts
-	logger      zerolog.Logger
+	nameServerAddresses []string
+	nameServers         []string
+	domain              string
+	email               string
+	recordsMu           sync.RWMutex
+	records             map[string]hardcodedRecord
+	zoneFile            string
+	delegations         *zoneCuts
+	logger              zerolog.Logger
+	mux                 *dns.ServeMux
+	challengeName       string
+	challengeMu         sync.RWMutex
+	challengeValues     map[string]struct{}
 }
 
 type Option func(*Xip)
@@ -43,12 +53,6 @@ func WithEmail(email string) Option {
 	}
 }
 
-func WithDnsPort(port uint) Option {
-	return func(x *Xip) {
-		x.dnsPort = port
-	}
-}
-
 func WithZoneFile(path string) Option {
 	return func(x *Xip) {
 		x.zoneFile = path
@@ -61,20 +65,10 @@ func WithLogger(logger zerolog.Logger) Option {
 	}
 }
 
-func WithNameServers(nameServers []string) Option {
+// WithNameServers sets the IPv4 addresses of the zone's name servers, served as ns1, ns2 and so on in the order given, and as the A records of the apex.
+func WithNameServers(addresses []string) Option {
 	return func(x *Xip) {
-		x.recordsMu.Lock()
-		defer x.recordsMu.Unlock()
-		for i, ns := range nameServers {
-			name := fmt.Sprintf("ns%d.%s.", i+1, x.domain)
-			ip := net.ParseIP(ns)
-
-			entry := x.records[name]
-			entry.A = append(entry.A, ip)
-			x.records[name] = entry
-
-			x.nameServers = append(x.nameServers, name)
-		}
+		x.nameServerAddresses = slices.Clone(addresses)
 	}
 }
 
@@ -83,36 +77,6 @@ var (
 	dottedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4})($|[.-])`)
 	dashedIpV4Regex = regexp.MustCompile(`(?:^|(?:[\w\d])+\.)(((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\-?\b){4})($|[.-])`)
 )
-
-func (xip *Xip) SetTXTRecord(fqdn string, value string) {
-	xip.logger.Trace().Str("fqdn", fqdn).Str("value", value).Msg("Trying to set TXT record")
-	if fqdn != fmt.Sprintf("_acme-challenge.%s.", xip.domain) {
-		xip.logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort setting TXT record")
-		return
-	}
-
-	xip.recordsMu.Lock()
-	defer xip.recordsMu.Unlock()
-	if rootRecords, ok := xip.records[fqdn]; ok {
-		rootRecords.TXT = []string{value}
-		xip.records[fmt.Sprintf("_acme-challenge.%s.", xip.domain)] = rootRecords
-	}
-}
-
-func (xip *Xip) UnsetTXTRecord(fqdn string) {
-	xip.logger.Trace().Str("fqdn", fqdn).Msg("Trying to unset TXT record")
-	if fqdn != fmt.Sprintf("_acme-challenge.%s.", xip.domain) {
-		xip.logger.Trace().Str("fqdn", fqdn).Msg("Not allowed, abort unsetting TXT record")
-		return
-	}
-
-	xip.recordsMu.Lock()
-	defer xip.recordsMu.Unlock()
-	if rootRecords, ok := xip.records[fqdn]; ok {
-		rootRecords.TXT = []string{}
-		xip.records[fmt.Sprintf("_acme-challenge.%s.", xip.domain)] = rootRecords
-	}
-}
 
 func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 	normalizedFqdn := strings.ToLower(fqdn)
@@ -162,7 +126,7 @@ func (xip *Xip) fqdnToA(fqdn string) []*dns.A {
 }
 
 func (xip *Xip) answerWithAuthority(question dns.Question, message *dns.Msg) {
-	message.Ns = append(message.Ns, xip.soaRecord(question))
+	message.Ns = append(message.Ns, xip.soaRecord(question.Name, uint32((time.Minute*5).Seconds())))
 }
 
 func (xip *Xip) handleA(question dns.Question, message *dns.Msg) {
@@ -337,7 +301,7 @@ func (xip *Xip) handleSRV(question dns.Question, message *dns.Msg) {
 }
 
 func (xip *Xip) handleSOA(question dns.Question, message *dns.Msg) {
-	message.Answer = append(message.Answer, xip.soaRecord(question))
+	message.Answer = append(message.Answer, xip.soaRecord(question.Name, uint32((time.Minute*5).Seconds())))
 }
 
 func emailToRname(email string) string {
@@ -347,13 +311,13 @@ func emailToRname(email string) string {
 	return localPart + "." + domain + "."
 }
 
-func (xip *Xip) soaRecord(question dns.Question) *dns.SOA {
+func (xip *Xip) soaRecord(name string, ttl uint32) *dns.SOA {
 	soa := new(dns.SOA)
 	soa.Hdr = dns.RR_Header{
-		Name:     question.Name,
+		Name:     name,
 		Rrtype:   dns.TypeSOA,
 		Class:    dns.ClassINET,
-		Ttl:      uint32((time.Minute * 5).Seconds()),
+		Ttl:      ttl,
 		Rdlength: 0,
 	}
 	soa.Ns = xip.nameServers[0]
@@ -384,6 +348,11 @@ func (xip *Xip) handleQuery(message *dns.Msg) {
 			message.Extra = append(message.Extra, d.glue...)
 			return
 		}
+	}
+
+	if dns.CanonicalName(question.Name) == xip.challengeName {
+		xip.handleChallenge(question, message)
+		return
 	}
 
 	switch question.Qtype {
@@ -466,40 +435,60 @@ func (xip *Xip) logResolved(message *dns.Msg) {
 	event.Msg("resolved")
 }
 
-func (xip *Xip) StartServer() {
-	if _, exists := os.LookupEnv("FLY_APP_NAME"); exists {
-		// we're probably running on fly, bind to fly-global-services
-		xip.server.Addr = "fly-global-services" + xip.server.Addr
+// Serve answers the queries arriving on conn until ctx is cancelled, then stops reading, waits for the handlers in flight and returns nil.
+// It returns the error of the read loop if that stops by itself. It takes ownership of conn and closes it in every case.
+func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn) error {
+	if conn == nil {
+		return errors.New("xip: serve: no socket")
 	}
+	// The server closes conn on most paths but not when ActivateAndServe fails before reading, and a second Close is harmless.
+	defer conn.Close()
 
-	err := xip.server.ListenAndServe()
-	defer xip.server.Shutdown()
-	if err != nil {
-		xip.logger.Error().Err(err).Msg("Failed to start DNS server")
-		if strings.Contains(err.Error(), "fly-global-services: no such host") {
-			// we're not running on fly, bind to 0.0.0.0 instead
-			port := strings.Split(xip.server.Addr, ":")[1]
-			xip.server = dns.Server{
-				Addr: fmt.Sprintf(":%s", port),
-				Net:  "udp",
-			}
+	started := make(chan struct{})
+	server := &dns.Server{
+		PacketConn:        conn,
+		Handler:           xip.mux,
+		NotifyStartedFunc: func() { close(started) },
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ActivateAndServe() }()
 
-			xip.StartServer()
-			return
+	// Shutdown refuses a server that has not started, so the context is only watched once the read loop runs.
+	select {
+	case <-started:
+	case err := <-served:
+		return fmt.Errorf("xip: serving DNS on %s: %w", conn.LocalAddr(), err)
+	}
+	xip.logger.Info().Str("dns_address", conn.LocalAddr().String()).Msg("Starting up DNS server")
+
+	select {
+	case err := <-served:
+		if err == nil {
+			return errors.New("xip: DNS read loop stopped without being shut down")
 		}
-
-		xip.logger.Fatal().Err(err).Msg("Failed to start DNS server")
+		return fmt.Errorf("xip: serving DNS on %s: %w", conn.LocalAddr(), err)
+	case <-ctx.Done():
 	}
-	xip.logger.Info().Str("dns_address", xip.server.Addr).Msg("Starting up DNS server")
+
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if err := server.ShutdownContext(shutdownCtx); err != nil {
+		xip.logger.Warn().Err(err).Msg("DNS server did not shut down cleanly")
+	}
+	// ShutdownContext has closed the socket by now, on time or at its limit, which ends any handler blocked on its reply, so a handler can only still be busy writing a log line; waiting keeps the promise that no handler runs after Serve returns, and the wait is not bounded because it only happens during a shutdown, which the supervisor's kill timeout or a second signal ends if it hangs.
+	if err := <-served; err != nil {
+		return fmt.Errorf("xip: serving DNS on %s: %w", conn.LocalAddr(), err)
+	}
+	return nil
 }
 
-func (xip *Xip) initNameServers(nameServers []string) {
+func (xip *Xip) initNameServers() {
 	rootDomainARecords := []net.IP{}
 
 	xip.recordsMu.Lock()
 	defer xip.recordsMu.Unlock()
 
-	for i, ns := range nameServers {
+	for i, ns := range xip.nameServerAddresses {
 		name := fmt.Sprintf("ns%d.%s.", i+1, xip.domain)
 		ip := net.ParseIP(ns)
 
@@ -512,8 +501,6 @@ func (xip *Xip) initNameServers(nameServers []string) {
 	}
 
 	xip.records[fmt.Sprintf("%s.", xip.domain)] = hardcodedRecord{A: rootDomainARecords}
-
-	xip.records[fmt.Sprintf("_acme-challenge.%s.", xip.domain)] = hardcodedRecord{TXT: []string{}}
 }
 
 func (xip *Xip) loadZoneFile() error {
@@ -525,7 +512,7 @@ func (xip *Xip) loadZoneFile() error {
 
 	server := zoneServer{
 		origin:   xip.domain,
-		reserved: append(slices.Clone(xip.nameServers), fmt.Sprintf("_acme-challenge.%s.", xip.domain)),
+		reserved: append(slices.Clone(xip.nameServers), xip.challengeName),
 	}
 	xip.recordsMu.RLock()
 	for _, name := range xip.nameServers {
@@ -552,24 +539,38 @@ func (xip *Xip) loadZoneFile() error {
 	return nil
 }
 
+// NewXip builds a server for one zone. It requires a valid domain (WithDomain), a bare email address for the SOA record (WithEmail) and at least one IPv4 name server address (WithNameServers). It reads no process-wide configuration and binds no socket: see Serve.
 func NewXip(opts ...Option) (*Xip, error) {
-	config := utils.GetConfig()
 	xip := &Xip{
-		domain:   config.Domain,
-		email:    config.Email,
-		dnsPort:  config.DnsPort,
-		records:  initialRecords(),
-		zoneFile: config.ZoneFile,
-		logger:   utils.Logger,
+		records:         initialRecords(),
+		logger:          utils.Logger,
+		challengeValues: make(map[string]struct{}),
 	}
 
 	for _, opt := range opts {
 		opt(xip)
 	}
 
-	if len(xip.nameServers) == 0 {
-		xip.initNameServers(config.NameServers)
+	domain, err := names.Canonical(xip.domain)
+	if err != nil {
+		return nil, fmt.Errorf("xip: %w", err)
 	}
+	xip.domain = domain
+	xip.challengeName = challengeLabel + domain + "."
+
+	if address, err := mail.ParseAddress(xip.email); err != nil || address.Address != xip.email {
+		return nil, fmt.Errorf("xip: email %q is not a bare address", xip.email)
+	}
+
+	if len(xip.nameServerAddresses) == 0 {
+		return nil, errors.New("xip: at least one name server is required")
+	}
+	for _, ns := range xip.nameServerAddresses {
+		if addr, err := netip.ParseAddr(ns); err != nil || !addr.Is4() {
+			return nil, fmt.Errorf("xip: name server %q is not an IPv4 address", ns)
+		}
+	}
+	xip.initNameServers()
 
 	if xip.zoneFile != "" {
 		if err := xip.loadZoneFile(); err != nil {
@@ -577,13 +578,8 @@ func NewXip(opts ...Option) (*Xip, error) {
 		}
 	}
 
-	xip.server = dns.Server{
-		Addr: fmt.Sprintf(":%d", xip.dnsPort),
-		Net:  "udp",
-	}
-
-	zone := fmt.Sprintf("%s.", xip.domain)
-	dns.HandleFunc(zone, xip.handleDnsRequest)
+	xip.mux = dns.NewServeMux()
+	xip.mux.HandleFunc(domain+".", xip.handleDnsRequest)
 
 	return xip, nil
 }

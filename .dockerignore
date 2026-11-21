@@ -1,4 +1,12 @@
-ddd
-loadtest
-*.log
-local-ip.sh
+# Only what the build needs is sent to the Docker daemon. Everything else in a checkout (stored keys, state, notes, scratch directories) stays out by default; a new top-level package has to be added here, and the build fails loudly when one is missing.
+*
+!go.mod
+!go.sum
+!main.go
+!app
+!certs
+!cmd
+!http
+!internal
+!utils
+!xip
