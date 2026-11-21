@@ -76,9 +76,10 @@ A [reference docker compose file](./compose.yml) is available for deployments us
 
 ## Testing
 
-- `make check` fails if any Go file is not `gofmt`-clean, then runs `go vet` and `go test -race` on every package. It only looks at files git knows about (tracked, or untracked and not ignored), and it needs no network: the live suite is skipped unless `E2E_FLY_CONFIG` is set.
+- `make check` fails if any Go file is not `gofmt`-clean, then runs `go vet` and `go test -race` on every package. It only looks at files git knows about (tracked, or untracked and not ignored), and it needs no network: the certificate tests run an ACME server inside the test process, and the live suites are skipped unless `E2E_FLY_CONFIG` or `E2E_LIFECYCLE_FLY_CONFIG` is set.
 - `make e2e` runs the live end-to-end suite against the staging deployment described by `fly.staging.toml` (the default).
 - `make e2e FLY_CONFIG=fly.toml` runs the same suite against production.
+- `make e2e-lifecycle` asks the staging deployment for a certificate renewal through the Fly Machines API and checks that both certificates change while DNS keeps answering, then restarts the machine and checks that the same certificates are served again. It needs `FLY_API_TOKEN`, preferably a token limited to the staging app (`fly tokens create deploy -a local-ip-staging -x 1h` prints one), and it refuses every deployment other than the staging one.
 
 The live suite reads the zone, nameserver addresses, admin email and certificate authority from the Fly config file. It only reads from the target: it sends DNS queries to each nameserver and HTTP GET requests to the website, including the published wildcard certificate and key, which it keeps in memory. It also queries the public resolvers `1.1.1.1`, `8.8.8.8` and `9.9.9.10`, all of which must answer. DNS queries that get no response are retried with growing pauses, and every lost attempt is reported in the test output. When the Fly config sets `XIP_ZONE_FILE`, the suite reads the zone file delivered through the matching `[[files]]` entry and checks that every nameserver answers queries at and below each delegated name with a referral to the declared name servers and glue.
 
