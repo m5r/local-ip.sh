@@ -382,6 +382,11 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 			records: []string{"example.test. 300 IN MX 10 10-0-0-1.example.test."},
 		},
 		{
+			name:    "an MX record whose target carries an address after a name in its label",
+			content: "@ MX 10 mail-10-0-0-1\n",
+			records: []string{"example.test. 300 IN MX 10 mail-10-0-0-1.example.test."},
+		},
+		{
 			name:    "an MX record whose target owns only an AAAA record",
 			content: "@ MX 10 v6\nv6 AAAA 2001:db8::25\n",
 			records: []string{"example.test. 300 IN MX 10 v6.example.test.", "v6.example.test. 300 IN AAAA 2001:db8::25"},
@@ -862,6 +867,11 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			name:    "F15 TXT record at a dashed address",
 			content: "10-0-0-1 TXT \"x\"\n",
 			want:    recordFault("10-0-0-1.example.test.", "TXT", "10-0-0-1.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
+		},
+		{
+			name:    "F15 TXT record at a dashed address after a name in its label",
+			content: "app-10-0-0-1 TXT \"x\"\n",
+			want:    recordFault("app-10-0-0-1.example.test.", "TXT", "app-10-0-0-1.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
 		},
 		{
 			name:    "F15 A record below a dashed address",

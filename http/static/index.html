@@ -47,6 +47,7 @@
                 <p>Quick example, say your LAN IP address is <strong>192.168.1.10</strong>. Using local-ip.sh,</p>
                 <aside>
                     <p><strong>192-168-1-10</strong>.local-ip.sh resolves to 192.168.1.10</p>
+                    <p>app-<strong>192-168-1-10</strong>.local-ip.sh resolves to 192.168.1.10</p>
                     <p>dots.<strong>192.168.1.10</strong>.local-ip.sh resolves to 192.168.1.10</p>
                     <p>dashes.<strong>192-168-1-10</strong>.local-ip.sh resolves to 192.168.1.10</p>
                 </aside>
@@ -62,8 +63,8 @@
                 <p>
                     Be aware that wildcard certificates are not recursive, meaning they don&#x27;t match
                     &quot;sub-subdomains&quot;. <br>In our case, this certificate will only match subdomains of
-                    <code>local-ip.sh</code> such as <code>192-168-1-10.local-ip.sh</code> where dashes separate
-                    the numbers that make up the IP address.
+                    <code>local-ip.sh</code> such as <code>192-168-1-10.local-ip.sh</code> or <code>app-192-168-1-10.local-ip.sh</code>,
+                    where dashes separate the numbers that make up the IP address and the name in front of it.
                 </p>
             </article>
             <article>

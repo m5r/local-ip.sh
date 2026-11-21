@@ -1239,6 +1239,8 @@ func TestLoadTargetRejectsZoneFileThatClaimsAProbeName(t *testing.T) {
 		{name: "a delegation of the address probe", zone: "10-11-12-13 NS ns.other.test.\n", wantErr: []string{"the name 10-11-12-13.example.com.", `"dashed"`, reserved, "delegates it or a name above it: 10-11-12-13.example.com. NS"}},
 		{name: "a delegation above a numeric probe", zone: "12.13 NS ns.other.test.\n", wantErr: []string{"the name 10.11.12.13.example.com.", reserved, "delegates it or a name above it: 12.13.example.com. NS"}},
 		{name: "a delegation above the probe with labels after the address", zone: "app NS ns.other.test.\n", wantErr: []string{"the name 10-11-12-13.app.example.com.", reserved, "delegates it or a name above it: app.example.com. NS"}},
+		{name: "a delegation of the round trip through the address alone", zone: "127-0-0-1 NS ns.other.test.\n", wantErr: []string{"the name 127-0-0-1.example.com.", "the certificate round trip through 127-0-0-1.example.com", reserved, "delegates it or a name above it: 127-0-0-1.example.com. NS"}},
+		{name: "a delegation of the round trip through a name in front of the address", zone: "e2e-app-127-0-0-1 NS ns.other.test.\n", wantErr: []string{"the name e2e-app-127-0-0-1.example.com.", "the certificate round trip through e2e-app-127-0-0-1.example.com", reserved, "delegates it or a name above it: e2e-app-127-0-0-1.example.com. NS"}},
 	}
 
 	for _, tt := range tests {

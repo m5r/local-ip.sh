@@ -388,6 +388,7 @@ func BenchmarkHandleDnsRequest(b *testing.B) {
 		{"matching dotted A with prefix", "foo.bar.10.11.12.13", dns.TypeA},
 		{"unknown name A", "nope", dns.TypeA},
 		{"AAAA of a dashed name", "app.10-11-12-13", dns.TypeAAAA},
+		{"matching dashed A after a name in the label", "app-10-11-12-13", dns.TypeA},
 	}
 	levels := []zerolog.Level{zerolog.InfoLevel, zerolog.DebugLevel}
 

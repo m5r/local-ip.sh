@@ -247,6 +247,12 @@ func exampleZoneRows(t *testing.T) []answerRow {
 	name254 := nameOfWireLength(t, 254, exampleApex)
 	name255 := nameOfWireLength(t, 255, exampleApex)
 	address255 := nameOfWireLength(t, 255, "10-0-0-1."+exampleApex)
+	const newFormLabel = "app-10-0-0-1."
+	newForm254 := newFormLabel + nameOfWireLength(t, 254-len(newFormLabel), exampleApex)
+	newForm255 := newFormLabel + nameOfWireLength(t, 255-len(newFormLabel), exampleApex)
+	if wireLengthOf(t, newForm254) != 254 || wireLengthOf(t, newForm255) != 255 {
+		t.Fatalf("built names of %d and %d octets, want 254 and 255", wireLengthOf(t, newForm254), wireLengthOf(t, newForm255))
+	}
 	subReferral := answerWant{
 		rcode:      dns.RcodeSuccess,
 		authority:  []string{"sub.example.test. 300 IN NS ns1.sub.example.test.", "sub.example.test. 300 IN NS ns.other.test."},
@@ -305,6 +311,9 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		look("a name that carries an address has no data of other types", noData,
 			asks([]string{"10-0-0-1.example.test."}, dns.TypeAAAA, dns.TypeTXT, dns.TypeMX, dns.TypeNS, dns.TypeSOA, dns.TypeCNAME, dns.TypeCAA, dns.TypeDS, dns.TypeHTTPS)...),
 		look("10-0-0-1.example.test. ANY is the HINFO record", hinfo, ask("10-0-0-1.example.test.", dns.TypeANY)),
+		look("aPp-10-0-0-1.Example.TEST. A, an address after a name in its label, is owned by the name as asked", positive("{q} 300 IN A 10.0.0.1"), ask("aPp-10-0-0-1.Example.TEST.", dns.TypeA)),
+		look("app-10-0-0-1.example.test. AAAA has no data", noData, ask("app-10-0-0-1.example.test.", dns.TypeAAAA)),
+		look("app-10-0-0-1.example.test. ANY is the HINFO record", hinfo, ask("app-10-0-0-1.example.test.", dns.TypeANY)),
 		look("parents of a dotted name have no data", noData,
 			ask("1.example.test.", dns.TypeA), ask("0.1.example.test.", dns.TypeA), ask("0.0.1.example.test.", dns.TypeNS)),
 		look("nope.example.test. has no data", noData, asks([]string{"nope.example.test."}, dns.TypeA, dns.TypeTXT, dns.TypeNS, dns.TypeANY)...),
@@ -312,6 +321,9 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		look("names of 254 and 255 octets that own nothing do not exist", noName, asks([]string{name254, name255}, dns.TypeA, dns.TypeTXT, dns.TypeANY)...),
 		look("a name of 255 octets that carries an address has its A record", positive("{q} 300 IN A 10.0.0.1"), ask(address255, dns.TypeA)),
 		look("a name of 255 octets that carries an address has no AAAA record", noData, ask(address255, dns.TypeAAAA)),
+		look("names of 254 and 255 octets whose first label carries an address after a name have its A record", positive("{q} 300 IN A 10.0.0.1"), asks([]string{newForm254, newForm255}, dns.TypeA)...),
+		look("names of 254 and 255 octets whose first label carries an address after a name have no AAAA record", noData, asks([]string{newForm254, newForm255}, dns.TypeAAAA)...),
+		look("names of 254 and 255 octets whose first label carries an address after a name have the HINFO record for ANY", hinfo, asks([]string{newForm254, newForm255}, dns.TypeANY)...),
 		{name: "a name of 255 octets that owns a TXT record has it", exchanges: exchanges(positive(`{q} 300 IN TXT "long"`), ask(name255, dns.TypeTXT)), lookup: true, longZone: true},
 		{name: "a name of 255 octets that owns a TXT record has no A record", exchanges: exchanges(noData, ask(name255, dns.TypeA)), lookup: true, longZone: true},
 		{name: "names at and below the cut sub are referred", exchanges: exchanges(subReferral,

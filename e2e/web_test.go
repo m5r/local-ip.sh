@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 const (
@@ -251,19 +253,13 @@ func wildcardCertificate(t *testing.T, tg *target) {
 	})
 }
 
-// lanRoundTrip serves the published pair on loopback and reaches it through the target's own DNS
-// answer for 127-0-0-1.<d>, which is exactly how users are meant to use the wildcard certificate.
-func lanRoundTrip(t *testing.T, tg *target, pair keyPair) {
-	host := "127-0-0-1." + tg.zone()
-	addrs, err := lookupA(t, tg.nameServers[0], host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loopback := netip.MustParseAddr("127.0.0.1")
-	if !slices.Equal(addrs, []netip.Addr{loopback}) {
-		t.Fatalf("%s A from %s = %v, want [%s]", host, tg.nameServers[0], addrs, loopback)
-	}
+// lanRoundTripHosts are the names through which lanRoundTrip reaches the published pair: the address alone, and a name in front of the address, the form the README recommends for HTTPS. Each is one label in front of the domain, the only names the wildcard certificate covers.
+func lanRoundTripHosts(domain string) []string {
+	return []string{"127-0-0-1." + domain, "e2e-app-127-0-0-1." + domain}
+}
 
+// lanRoundTrip serves the published pair on loopback and reaches it through the target's own DNS answer for each of lanRoundTripHosts, which is exactly how users are meant to use the wildcard certificate.
+func lanRoundTrip(t *testing.T, tg *target, pair keyPair) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listening on loopback: %v", err)
@@ -278,8 +274,22 @@ func lanRoundTrip(t *testing.T, tg *target, pair keyPair) {
 	server.StartTLS()
 	t.Cleanup(server.Close)
 
-	client := pinnedClient(t, tg, addrs[0])
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	resp, _ := get(t, client, "https://"+net.JoinHostPort("127-0-0-1."+tg.domain, port)+"/")
-	expectStatus(t, resp, http.StatusOK)
+	loopback := netip.MustParseAddr("127.0.0.1")
+
+	for _, host := range lanRoundTripHosts(tg.domain) {
+		t.Run(host, func(t *testing.T) {
+			addrs, err := lookupA(t, tg.nameServers[0], dns.Fqdn(host))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(addrs, []netip.Addr{loopback}) {
+				t.Fatalf("%s A from %s = %v, want [%s]", host, tg.nameServers[0], addrs, loopback)
+			}
+
+			client := pinnedClient(t, tg, addrs[0])
+			resp, _ := get(t, client, "https://"+net.JoinHostPort(host, port)+"/")
+			expectStatus(t, resp, http.StatusOK)
+		})
+	}
 }

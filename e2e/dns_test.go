@@ -716,6 +716,14 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		{name: "dotted with prefix", qname: "foo.bar.10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
 		{name: "dashed with labels after the address", qname: "10-11-12-13.app." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
 		{name: "dotted with labels after the address", qname: "10.11.12.13.app." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+		{name: "dashed after a name in the label", qname: "app-10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+		{name: "dashed before a name in the label", qname: "10-11-12-13-app." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+		{name: "dashed between names in the label", qname: "a-10-11-12-13-b." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+		{name: "dotted after a name and a hyphen", qname: "app-10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+		{name: "mixed case dashed after a name in the label", qname: alternateCase("app-10-11-12-13." + zone), qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+		{name: "dashed after a name in the label AAAA", qname: "app-10-11-12-13." + zone, qtype: dns.TypeAAAA, rcodes: noError, authoritative: true, check: noData},
+		{name: "three numbers after a name in the label", qname: "app-10-11-12." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: noData},
+		{name: "leading zero", qname: "10-11-12-013." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: noData},
 		{name: "apex A", qname: zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectASet(tg.nameServers)},
 	}
 	for i, host := range hosts {
@@ -813,6 +821,7 @@ func publicResolverCases(tg *target, label func() string) []dnsCase {
 	want := netip.MustParseAddr("10.11.12.13")
 	return []dnsCase{
 		{name: "dashed with random prefix", qname: label() + ".10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
+		{name: "dashed with random prefix in the label", qname: label() + "-10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		// The resolver minimises the query name on its way and passes through 13.<zone>, 12.13.<zone> and 11.12.13.<zone>, which used to answer NXDOMAIN.
 		{name: "dotted with random prefix", qname: label() + ".10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, check: expectNS(tg.nameServerHosts(), nil)},
@@ -859,26 +868,45 @@ func checkProbes(tg *target) error {
 			return fmt.Errorf("the name %q the suite expects to be refused as outside the zone is inside %s", name, zone)
 		}
 	}
-	return checkProbeCases(tg, authoritativeCases(tg, nil))
+	if err := checkProbeCases(tg, authoritativeCases(tg, nil)); err != nil {
+		return err
+	}
+	for _, host := range lanRoundTripHosts(tg.domain) {
+		if err := checkProbeName(tg, host, "the certificate round trip through "+host); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// checkProbeCases refuses a case whose name below the apex the zone file declares a record at or delegates, the names the suite reserves for its probes; a case generated from the zone file asks for a declared name by construction.
+// checkProbeCases holds the name of every case to checkProbeName; a case generated from the zone file is left out, because it asks for a declared name by construction.
 func checkProbeCases(tg *target, cases []dnsCase) error {
-	zone := tg.zone()
 	for _, tc := range cases {
-		name := dns.CanonicalName(tc.qname)
-		if tc.fromZoneFile || name == zone || !dns.IsSubDomain(zone, name) {
+		if tc.fromZoneFile {
 			continue
 		}
-		for _, set := range tg.recordSets {
-			if set.owner == name {
-				return fmt.Errorf("the name %s, which the case %q asks for, is reserved for the suite's probes, and the zone file declares %s %s there", name, tc.name, set.owner, dns.Type(set.rrtype))
-			}
+		if err := checkProbeName(tg, tc.qname, fmt.Sprintf("the case %q", tc.name)); err != nil {
+			return err
 		}
-		for _, d := range tg.delegations {
-			if dns.IsSubDomain(d.cut, name) {
-				return fmt.Errorf("the name %s, which the case %q asks for, is reserved for the suite's probes, and the zone file delegates it or a name above it: %s NS", name, tc.name, d.cut)
-			}
+	}
+	return nil
+}
+
+// checkProbeName refuses a name below the apex that the zone file declares a record at or delegates, the names the suite reserves for its probes; askedBy names the probe in the error.
+func checkProbeName(tg *target, qname, askedBy string) error {
+	zone := tg.zone()
+	name := dns.CanonicalName(qname)
+	if name == zone || !dns.IsSubDomain(zone, name) {
+		return nil
+	}
+	for _, set := range tg.recordSets {
+		if set.owner == name {
+			return fmt.Errorf("the name %s, which %s asks for, is reserved for the suite's probes, and the zone file declares %s %s there", name, askedBy, set.owner, dns.Type(set.rrtype))
+		}
+	}
+	for _, d := range tg.delegations {
+		if dns.IsSubDomain(d.cut, name) {
+			return fmt.Errorf("the name %s, which %s asks for, is reserved for the suite's probes, and the zone file delegates it or a name above it: %s NS", name, askedBy, d.cut)
 		}
 	}
 	return nil
@@ -1178,7 +1206,10 @@ func TestReferenceSOA(t *testing.T) {
 
 func TestCheckProbeCases(t *testing.T) {
 	tg := testTarget()
-	tg.delegations = []targetDelegation{{cut: "e2e-12345678.10-11-12-13.example.test.", nameServers: []string{"ns.other.test."}}}
+	tg.delegations = []targetDelegation{
+		{cut: "e2e-12345678.10-11-12-13.example.test.", nameServers: []string{"ns.other.test."}},
+		{cut: "e2e-abcdef01-10-11-12-13.example.test.", nameServers: []string{"ns.other.test."}},
+	}
 	tg.recordSets = []targetRecordSet{{owner: "e2e-87654321.10.11.12.13.example.test.", rrtype: dns.TypeTXT, ttl: 300}}
 	tests := []struct {
 		name    string
@@ -1187,6 +1218,7 @@ func TestCheckProbeCases(t *testing.T) {
 	}{
 		{name: "accepts generated names the zone file does not touch", label: "e2e-00000000"},
 		{name: "rejects a generated name the zone file delegates", label: "e2e-12345678", wantErr: []string{"e2e-12345678.10-11-12-13.example.test.", `"dashed with random prefix"`, "reserved for the suite's probes", "delegates it or a name above it: e2e-12345678.10-11-12-13.example.test. NS"}},
+		{name: "rejects a generated name in the label the zone file delegates", label: "e2e-abcdef01", wantErr: []string{"e2e-abcdef01-10-11-12-13.example.test.", `"dashed with random prefix in the label"`, "reserved for the suite's probes", "delegates it or a name above it: e2e-abcdef01-10-11-12-13.example.test. NS"}},
 		{name: "rejects a generated name the zone file declares a record at", label: "e2e-87654321", wantErr: []string{"e2e-87654321.10.11.12.13.example.test.", `"dotted with random prefix"`, "reserved for the suite's probes", "declares e2e-87654321.10.11.12.13.example.test. TXT there"}},
 	}
 

@@ -10,7 +10,7 @@ local-ip.sh packs up:
  - a Let's Encrypt client that takes care of obtaining and renewing the wildcard certificate for `*.local-ip.sh` and the root certificate for `local-ip.sh` using the [DNS-01 challenge](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge)
  - an HTTP server that serves the website and the wildcard certificate files
 
-It answers queries with the IPv4 address it may find in the subdomain by pattern matching the FQDN. It registers an account with Let's Encrypt on its first run and keeps two certificates: the wildcard certificate for `*.local-ip.sh`, whose private key is published, and a separate certificate for the root domain `local-ip.sh` that serves the website. The account and the certificates are stored in the state directory (`./state` by default). Each certificate is renewed when a third of its lifetime remains (half of it for a certificate valid less than 10 days), or earlier when Let's Encrypt asks for it. The website is served over HTTP until the root domain's certificate exists, and HTTP requests are redirected to HTTPS from then on.
+It answers a query for the A record of a name that carries an IPv4 address with that address (see [Names](#names)). It registers an account with Let's Encrypt on its first run and keeps two certificates: the wildcard certificate for `*.local-ip.sh`, whose private key is published, and a separate certificate for the root domain `local-ip.sh` that serves the website. The account and the certificates are stored in the state directory (`./state` by default). Each certificate is renewed when a third of its lifetime remains (half of it for a certificate valid less than 10 days), or earlier when Let's Encrypt asks for it. The website is served over HTTP until the root domain's certificate exists, and HTTP requests are redirected to HTTPS from then on.
 
 ## Usage
 
@@ -19,6 +19,8 @@ go run ./main.go --staging --dns-port 9053 --http-port 9080 --https-port 9443 --
 
 dig @localhost -p 9053 10-0-1-29.local-ip.sh +short
 # 10.0.1.29
+dig @localhost -p 9053 app-10-0-1-29.local-ip.sh +short
+# 10.0.1.29
 dig @localhost -p 9053 app.10-0-1-29.local-ip.sh +short
 # 10.0.1.29
 dig @localhost -p 9053 foo.bar.10.0.1.29.local-ip.sh +short
@@ -26,6 +28,22 @@ dig @localhost -p 9053 foo.bar.10.0.1.29.local-ip.sh +short
 dig @localhost -p 9053 127.0.0.1.local-ip.sh +short
 # 127.0.0.1
 ```
+
+### Names
+
+A name carries an address when the labels in front of the domain hold four numbers from 0 to 255, written without leading zeros and joined either by hyphens or by dots, with a hyphen, a dot or an end of the name on each side:
+
+| Name | Resolves to |
+| --- | --- |
+| `10-0-1-29.local-ip.sh` | 10.0.1.29 |
+| `app-10-0-1-29.local-ip.sh`, `10-0-1-29-app.local-ip.sh` | 10.0.1.29 |
+| `app.10-0-1-29.local-ip.sh`, `foo.bar.10.0.1.29.local-ip.sh` | 10.0.1.29 |
+| `10.0.1.29.local-ip.sh` | 10.0.1.29 |
+| `10-0-1-29.app.local-ip.sh`, `10.0.1.29.app.local-ip.sh` | 10.0.1.29 |
+
+When a name holds several addresses, one written with hyphens is preferred to one written with dots, and among those the first from the left counts. A number directly in front of an address is therefore read as part of it: `web-1-10-0-1-29.local-ip.sh` resolves to 1.10.0.1, so write `web1-10-0-1-29.local-ip.sh`. Letter case does not matter. `10-0-1.local-ip.sh` (three numbers), `10-0-01-29.local-ip.sh` (a leading zero) and `10-0-1-256.local-ip.sh` carry no address.
+
+The wildcard certificate is for `*.local-ip.sh`, which matches exactly one label in front of the domain: `10-0-1-29.local-ip.sh` and `app-10-0-1-29.local-ip.sh` can be served over HTTPS with it. It does not cover a name with two or more labels in front of `local-ip.sh`, such as `app.10-0-1-29.local-ip.sh` or any address written with dots.
 
 ### Configuration
 

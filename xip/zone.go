@@ -157,14 +157,10 @@ func (z *zone) checkBuiltInAnswer(rrtype uint16, size int, err error) error {
 func (z *zone) lookup(question dns.Question, name string) (kind lookupKind, answer, additional []dns.RR) {
 	sets := z.records[name]
 	if sets == nil {
-		exists := canHaveChild(name)
-		// Matching the address is the costliest step of a query, and its result only changes an answer for A, for ANY, or for a name too long to exist otherwise.
-		if question.Qtype == dns.TypeA || question.Qtype == dns.TypeANY || !exists {
-			if addr, ok := addressIn(strings.TrimSuffix(name, z.apex)); ok {
-				return addressAnswer(question, addr)
-			}
+		if addr, ok := addressIn(strings.TrimSuffix(name, z.apex)); ok {
+			return addressAnswer(question, addr)
 		}
-		if exists {
+		if canHaveChild(name) {
 			return lookupNoData, nil, nil
 		}
 		return lookupNoName, nil, nil
