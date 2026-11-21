@@ -372,8 +372,8 @@ func TestLoadStagingConfig(t *testing.T) {
 	if tg.app != "local-ip-staging" {
 		t.Errorf("app = %q, want %q", tg.app, "local-ip-staging")
 	}
-	if tg.domain != "staging.local-ip.sh" {
-		t.Errorf("domain = %q, want %q", tg.domain, "staging.local-ip.sh")
+	if tg.domain != "xip-staging.local-ip.sh" {
+		t.Errorf("domain = %q, want %q", tg.domain, "xip-staging.local-ip.sh")
 	}
 	want := []netip.Addr{netip.MustParseAddr("149.248.203.129")}
 	if !slices.Equal(tg.nameServers, want) {
@@ -600,17 +600,17 @@ func TestLoadTargetDelegations(t *testing.T) {
 		{
 			configPath: filepath.Join("..", "fly.toml"),
 			want: []targetDelegation{{
-				cut:         "staging.local-ip.sh.",
-				nameServers: []string{"ns1.staging.local-ip.sh."},
-				glue:        map[string][]netip.Addr{"ns1.staging.local-ip.sh.": {netip.MustParseAddr("149.248.203.129")}},
+				cut:         "xip-staging.local-ip.sh.",
+				nameServers: []string{"ns1.xip-staging.local-ip.sh."},
+				glue:        map[string][]netip.Addr{"ns1.xip-staging.local-ip.sh.": {netip.MustParseAddr("149.248.203.129")}},
 			}},
 		},
 		{
 			configPath: filepath.Join("..", "fly.staging.toml"),
 			want: []targetDelegation{{
-				cut:         "e2e-delegated.staging.local-ip.sh.",
-				nameServers: []string{"ns1.e2e-delegated.staging.local-ip.sh."},
-				glue:        map[string][]netip.Addr{"ns1.e2e-delegated.staging.local-ip.sh.": {netip.MustParseAddr("192.0.2.53")}},
+				cut:         "e2e-delegated.xip-staging.local-ip.sh.",
+				nameServers: []string{"ns1.e2e-delegated.xip-staging.local-ip.sh."},
+				glue:        map[string][]netip.Addr{"ns1.e2e-delegated.xip-staging.local-ip.sh.": {netip.MustParseAddr("192.0.2.53")}},
 			}},
 		},
 	}

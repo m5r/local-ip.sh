@@ -9,7 +9,7 @@ auto_rollback = true
 [build]
 
 [env]
-XIP_DOMAIN = "staging.local-ip.sh"
+XIP_DOMAIN = "xip-staging.local-ip.sh"
 XIP_EMAIL = "admin@local-ip.sh"
 XIP_ZONE_FILE = "/etc/local-ip.zone"
 XIP_NAMESERVERS = "149.248.203.129"
@@ -21,7 +21,7 @@ destination = "/local-ip/.lego"
 
 [[files]]
 guest_path = "/etc/local-ip.zone"
-local_path = "zones/staging.local-ip.sh.zone"
+local_path = "zones/xip-staging.local-ip.sh.zone"
 
 [[services]]
 protocol = "udp"

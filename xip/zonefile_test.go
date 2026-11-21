@@ -437,7 +437,7 @@ func TestParseDelegationsReferralSizeBoundary(t *testing.T) {
 		content string
 		fits    bool
 	}{
-		{name: "production-shaped delegation", content: "staging NS ns1.staging\nns1.staging A 149.248.203.129\n", fits: true},
+		{name: "production-shaped delegation", content: "xip-staging NS ns1.xip-staging\nns1.xip-staging A 149.248.203.129\n", fits: true},
 		{name: "largest number of name servers that fits", content: manyNameServers(largestFittingNameServerCount(t)), fits: true},
 		{name: "one name server more", content: manyNameServers(largestFittingNameServerCount(t) + 1), fits: false},
 	}
@@ -488,7 +488,7 @@ func mustRR(t *testing.T, record string) dns.RR {
 }
 
 func TestLongestNameIn(t *testing.T) {
-	for _, cut := range []string{"sub.example.test.", "a.b.c.example.test.", "staging.local-ip.sh.", "x.example.test."} {
+	for _, cut := range []string{"sub.example.test.", "a.b.c.example.test.", "xip-staging.local-ip.sh.", "x.example.test."} {
 		t.Run(cut, func(t *testing.T) {
 			name, err := longestNameIn(cut)
 			if err != nil {
@@ -595,6 +595,46 @@ func TestFindDelegation(t *testing.T) {
 	}
 }
 
+// A delegation takes every name below its label away from the hosted instance, including names
+// that carry an address, so the hosted instance only delegates labels reserved for the project.
+const projectLabelPrefix = "xip-"
+
+func isProjectCut(cut, origin string) bool {
+	origin = dns.Fqdn(origin)
+	if !dns.IsSubDomain(origin, cut) {
+		return false
+	}
+	labels := dns.SplitDomainName(cut)
+	below := len(labels) - dns.CountLabel(origin)
+	if below < 1 {
+		return false
+	}
+	return strings.HasPrefix(labels[below-1], projectLabelPrefix)
+}
+
+func TestIsProjectCut(t *testing.T) {
+	tests := []struct {
+		cut  string
+		want bool
+	}{
+		{cut: "xip-staging.local-ip.sh.", want: true},
+		{cut: "dev.local-ip.sh.", want: false},
+		{cut: "xipstaging.local-ip.sh.", want: false},
+		{cut: "staging.xip.local-ip.sh.", want: false},
+		{cut: "a.xip-staging.local-ip.sh.", want: true},
+		{cut: "xip-staging.example.test.", want: false},
+		{cut: "local-ip.sh.", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.cut, func(t *testing.T) {
+			if got := isProjectCut(tt.cut, "local-ip.sh"); got != tt.want {
+				t.Errorf("isProjectCut(%q, %q) = %v, want %v", tt.cut, "local-ip.sh", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestRepositoryZoneFiles loads the zone files delivered to the deployments the way their servers
 // do, so a file that would stop a server at startup fails here first.
 func TestRepositoryZoneFiles(t *testing.T) {
@@ -604,20 +644,24 @@ func TestRepositoryZoneFiles(t *testing.T) {
 		reserved  []string
 		addresses []netip.Addr
 		cuts      []string
+		// The hosted instance has users whose names a delegation would take away; the staging
+		// instance has none.
+		hosted bool
 	}{
 		{
 			file:      "local-ip.sh.zone",
 			origin:    "local-ip.sh",
 			reserved:  []string{"ns1.local-ip.sh.", "ns2.local-ip.sh.", "_acme-challenge.local-ip.sh."},
 			addresses: []netip.Addr{netip.MustParseAddr("137.66.40.11"), netip.MustParseAddr("137.66.40.12")},
-			cuts:      []string{"staging.local-ip.sh."},
+			cuts:      []string{"xip-staging.local-ip.sh."},
+			hosted:    true,
 		},
 		{
-			file:      "staging.local-ip.sh.zone",
-			origin:    "staging.local-ip.sh",
-			reserved:  []string{"ns1.staging.local-ip.sh.", "_acme-challenge.staging.local-ip.sh."},
+			file:      "xip-staging.local-ip.sh.zone",
+			origin:    "xip-staging.local-ip.sh",
+			reserved:  []string{"ns1.xip-staging.local-ip.sh.", "_acme-challenge.xip-staging.local-ip.sh."},
 			addresses: []netip.Addr{netip.MustParseAddr("149.248.203.129")},
-			cuts:      []string{"e2e-delegated.staging.local-ip.sh."},
+			cuts:      []string{"e2e-delegated.xip-staging.local-ip.sh."},
 		},
 	}
 
@@ -632,8 +676,17 @@ func TestRepositoryZoneFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := delegations.sortedCuts(); !slices.Equal(got, tt.cuts) {
-				t.Errorf("cuts = %v, want %v", got, tt.cuts)
+			cuts := delegations.sortedCuts()
+			if !slices.Equal(cuts, tt.cuts) {
+				t.Errorf("cuts = %v, want %v", cuts, tt.cuts)
+			}
+			if !tt.hosted {
+				return
+			}
+			for _, cut := range cuts {
+				if !isProjectCut(cut, tt.origin) {
+					t.Errorf("%s delegates %s: only labels starting with %q may be delegated on the hosted instance, because a delegation takes users' names below the label away from the service", tt.file, cut, projectLabelPrefix)
+				}
 			}
 		})
 	}

@@ -1,4 +1,7 @@
 ; Zone file of the production instance, origin local-ip.sh.
-; staging.local-ip.sh is served by the staging instance (Fly app local-ip-staging).
-staging      NS  ns1.staging
-ns1.staging  A   149.248.203.129
+; xip-staging.local-ip.sh is served by the staging instance (Fly app local-ip-staging).
+; A delegation takes every name below its label away from this instance, including names that
+; carry an address: 10-0-0-1.staging.local-ip.sh is a name of the service. Only labels that start
+; with xip-, which are reserved for the project, may be delegated here.
+xip-staging      NS  ns1.xip-staging
+ns1.xip-staging  A   149.248.203.129

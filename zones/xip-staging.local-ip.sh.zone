@@ -1,4 +1,4 @@
-; Zone file of the staging instance, origin staging.local-ip.sh.
+; Zone file of the staging instance, origin xip-staging.local-ip.sh.
 ; This delegation exists only so the e2e suite can verify referrals on staging.
 ; 192.0.2.53 is a documentation address (RFC 5737) where nothing answers.
 e2e-delegated      NS  ns1.e2e-delegated

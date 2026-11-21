@@ -47,6 +47,29 @@ func TestResolveDashUnit(t *testing.T) {
 	}
 }
 
+func TestResolveLabelsAfterAddress(t *testing.T) {
+	xip, err := NewXip(
+		WithDomain("local-ip.sh"),
+		WithDnsPort(9053),
+		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"192-168-1-29.app.local-ip.sh", "192.168.1.29.app.local-ip.sh"} {
+		t.Run(name, func(t *testing.T) {
+			records := xip.fqdnToA(name)
+			if len(records) != 1 {
+				t.Fatalf("got %d A records, want 1: %v", len(records), records)
+			}
+			if got, want := records[0].A.String(), "192.168.1.29"; got != want {
+				t.Errorf("A = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
 func TestConstructor(t *testing.T) {
 	xip, err := NewXip(
 		WithDomain("local-ip.sh"),

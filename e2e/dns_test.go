@@ -362,6 +362,8 @@ func authoritativeAnswers(t *testing.T, tg *target) {
 				{name: "dashed with prefix", qname: "app.10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
 				{name: "dotted", qname: "10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
 				{name: "dotted with prefix", qname: "foo.bar.10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+				{name: "dashed with labels after the address", qname: "10-11-12-13.app." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
+				{name: "dotted with labels after the address", qname: "10.11.12.13.app." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
 				{name: "apex A", qname: zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectASet(tg.nameServers)},
 			}
 			for i, host := range hosts {
