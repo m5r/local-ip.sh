@@ -108,9 +108,9 @@ func config() (app.Config, error) {
 		HTTPAddress:   ":" + ports["http-port"],
 		HTTPSAddress:  ":" + ports["https-port"],
 		StateDir:      viper.GetString("state-dir"),
-		StaticDir:     "./http/static",
 		DirectoryURL:  directoryURL,
 		ACMEProfile:   viper.GetString("acme-profile"),
+		Region:        os.Getenv("FLY_REGION"),
 		Logger:        utils.Logger,
 	}, nil
 }
@@ -141,7 +141,9 @@ func invalidOption(name, text string, err error) error {
 }
 
 func Execute() {
-	defineFlags(command)
+	if err := defineFlags(command); err != nil {
+		utils.Logger.Fatal().Err(err).Msg("Failed to bind the command line flags")
+	}
 
 	if err := command.Execute(); err != nil {
 		utils.Logger.Fatal().Err(err).Msg("Failed to run local-ip.sh")
@@ -149,45 +151,20 @@ func Execute() {
 }
 
 // defineFlags declares the command line flags on cmd and binds each one to viper under its own name.
-func defineFlags(cmd *cobra.Command) {
+func defineFlags(cmd *cobra.Command) error {
 	flags := cmd.Flags()
-
 	flags.String("log-level", utils.DefaultLogLevel, "Log level: trace, debug, info, warn or error")
-	viper.BindPFlag("log-level", flags.Lookup("log-level"))
-
 	flags.String("log-format", utils.DefaultLogFormat, "Log format: auto, json or console (auto is console on a terminal, json otherwise)")
-	viper.BindPFlag("log-format", flags.Lookup("log-format"))
-
 	flags.String("log-file", "", "Path of an additional rotating log file (optional)")
-	viper.BindPFlag("log-file", flags.Lookup("log-file"))
-
 	flags.String("dns-port", "53", "Port for the DNS server")
-	viper.BindPFlag("dns-port", flags.Lookup("dns-port"))
-
 	flags.String("http-port", "80", "Port for the HTTP server")
-	viper.BindPFlag("http-port", flags.Lookup("http-port"))
-
 	flags.String("https-port", "443", "Port for the HTTPS server")
-	viper.BindPFlag("https-port", flags.Lookup("https-port"))
-
 	flags.Bool("staging", false, "Enable to use the Let's Encrypt staging environment to obtain certificates")
-	viper.BindPFlag("staging", flags.Lookup("staging"))
-
 	flags.String("domain", "", "Root domain (required)")
-	viper.BindPFlag("domain", flags.Lookup("domain"))
-
 	flags.String("email", "", "ACME account email address (required)")
-	viper.BindPFlag("email", flags.Lookup("email"))
-
 	flags.String("nameservers", "", "List of nameservers separated by commas (required)")
-	viper.BindPFlag("nameservers", flags.Lookup("nameservers"))
-
 	flags.String("zone-file", "", "Path to a zone file declaring delegations (optional)")
-	viper.BindPFlag("zone-file", flags.Lookup("zone-file"))
-
 	flags.String("state-dir", "./state", "Directory for the ACME account and the certificates")
-	viper.BindPFlag("state-dir", flags.Lookup("state-dir"))
-
 	flags.String("acme-profile", "", "ACME certificate profile to request (optional, the certificate authority chooses by default)")
-	viper.BindPFlag("acme-profile", flags.Lookup("acme-profile"))
+	return viper.BindPFlags(flags)
 }

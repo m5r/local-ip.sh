@@ -12,7 +12,7 @@ import (
 )
 
 // optionVariables are cleared for every test, so that what the shell running the tests exports cannot change their outcome.
-var optionVariables = []string{"XIP_STAGING", "XIP_DNS_PORT", "XIP_HTTP_PORT", "XIP_HTTPS_PORT", "FLY_APP_NAME"}
+var optionVariables = []string{"XIP_STAGING", "XIP_DNS_PORT", "XIP_HTTP_PORT", "XIP_HTTPS_PORT", "FLY_APP_NAME", "FLY_REGION"}
 
 // setUp gives the test a fresh viper with the flags bound and the environment loaded, as Run does, and the command whose flags the test may set.
 func setUp(t *testing.T, environment map[string]string) *cobra.Command {
@@ -27,7 +27,9 @@ func setUp(t *testing.T, environment map[string]string) *cobra.Command {
 		t.Setenv(name, value)
 	}
 	command := &cobra.Command{}
-	defineFlags(command)
+	if err := defineFlags(command); err != nil {
+		t.Fatalf("defineFlags: %v", err)
+	}
 	loadEnvironment()
 	return command
 }
@@ -179,5 +181,16 @@ func checkPortRefused(t *testing.T, env, flag, value string) {
 	}
 	if !strings.Contains(err.Error(), env) || !strings.Contains(err.Error(), flag) || !strings.Contains(err.Error(), `"`+value+`"`) {
 		t.Errorf("the error %q does not name %s / %s and quote the value", err, flag, env)
+	}
+}
+
+func TestConfigRegion(t *testing.T) {
+	for _, region := range []string{"ams", ""} {
+		t.Run("FLY_REGION="+region, func(t *testing.T) {
+			setUp(t, map[string]string{"FLY_REGION": region})
+			if got := mustConfig(t).Region; got != region {
+				t.Errorf("Region is %q, want %q", got, region)
+			}
+		})
 	}
 }

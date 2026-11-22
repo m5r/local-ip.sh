@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/netutil"
 )
 
 // advertisedUDPSize is the largest UDP reply the server sends and the size its OPT record advertises: the value of DNS flag day 2020, small enough to cross common paths without IP fragmentation.
@@ -88,7 +90,7 @@ func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn, listener net.Lis
 	}
 
 	handler := dns.HandlerFunc(xip.handleDnsRequest)
-	bounded := newBoundedListener(listener, maxTCPConnections)
+	capped := newTCPListener(listener, maxTCPConnections)
 	udp := &transport{name: "UDP", address: conn.LocalAddr(), server: &dns.Server{
 		PacketConn:    conn,
 		Handler:       handler,
@@ -96,7 +98,7 @@ func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn, listener net.Lis
 		MsgAcceptFunc: acceptMessage,
 	}}
 	tcp := &transport{name: "TCP", address: listener.Addr(), server: &dns.Server{
-		Listener:      bounded,
+		Listener:      capped,
 		Handler:       handler,
 		MsgAcceptFunc: acceptMessage,
 		ReadTimeout:   tcpReadTimeout,
@@ -134,7 +136,7 @@ func (xip *Xip) Serve(ctx context.Context, conn net.PacketConn, listener net.Lis
 	case err := <-tcp.served:
 		tcp.ended = true
 		cause = tcp.stoppedByItself(err)
-	case err := <-bounded.failed:
+	case err := <-capped.failed:
 		cause = tcp.failure(err)
 	}
 	shutdownErr := xip.shutdown(ctx, transports)
@@ -205,36 +207,26 @@ func (xip *Xip) shutdown(ctx context.Context, transports []*transport) error {
 	return errors.Join(errs...)
 }
 
-// boundedListener caps the open TCP connections and gives every write on them a deadline, so that a client that stops reading cannot hold a handler, and with it the shutdown, forever. A connection beyond the cap waits in the kernel's accept queue.
-// It also reports on failed an accept error that ends the library's accept loop, the moment it happens: the library only returns that error once every open connection has finished, which can take minutes.
-type boundedListener struct {
+// tcpListener caps the open TCP connections with netutil.LimitListener, a connection beyond the cap waiting in the kernel's accept queue, and gives every write on them a deadline, so that a client that stops reading cannot hold a handler, and with it the shutdown, forever.
+// It also reports on failed an accept error that ends the library's accept loop, the moment it happens: the library only returns that error once every open connection has finished, which can take minutes. The net.ErrClosed that follows its own Close is the end of a shutdown, not a failure, and is not reported; any other error is.
+type tcpListener struct {
 	net.Listener
-	slots     chan struct{}
-	closed    chan struct{}
-	closeOnce sync.Once
-	failed    chan error
+	closed atomic.Bool
+	failed chan error
 }
 
-func newBoundedListener(listener net.Listener, connections int) *boundedListener {
-	return &boundedListener{
-		Listener: listener,
-		slots:    make(chan struct{}, connections),
-		closed:   make(chan struct{}),
+func newTCPListener(listener net.Listener, connections int) *tcpListener {
+	return &tcpListener{
+		Listener: netutil.LimitListener(listener, connections),
 		failed:   make(chan error, 1),
 	}
 }
 
-func (l *boundedListener) Accept() (net.Conn, error) {
-	select {
-	case l.slots <- struct{}{}:
-	case <-l.closed:
-		return nil, net.ErrClosed
-	}
+func (l *tcpListener) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
-		<-l.slots
 		// The library's accept loop retries after a temporary error and returns on any other, with the same test.
-		if netErr, ok := err.(net.Error); !ok || !netErr.Temporary() {
+		if netErr, ok := err.(net.Error); (!ok || !netErr.Temporary()) && !(l.closed.Load() && errors.Is(err, net.ErrClosed)) {
 			select {
 			case l.failed <- err:
 			default:
@@ -242,23 +234,20 @@ func (l *boundedListener) Accept() (net.Conn, error) {
 		}
 		return nil, err
 	}
-	return &boundedConn{Conn: conn, release: func() { <-l.slots }, writeTimeout: tcpWriteTimeout}, nil
+	return &deadlineConn{Conn: conn, writeTimeout: tcpWriteTimeout}, nil
 }
 
-func (l *boundedListener) Close() error {
-	l.closeOnce.Do(func() { close(l.closed) })
+func (l *tcpListener) Close() error {
+	l.closed.Store(true)
 	return l.Listener.Close()
 }
 
-// boundedConn holds one of the listener's slots until it is closed.
-type boundedConn struct {
+type deadlineConn struct {
 	net.Conn
-	release      func()
-	releaseOnce  sync.Once
 	writeTimeout time.Duration
 }
 
-func (c *boundedConn) Write(b []byte) (int, error) {
+func (c *deadlineConn) Write(b []byte) (int, error) {
 	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
 		return 0, err
 	}
@@ -268,10 +257,4 @@ func (c *boundedConn) Write(b []byte) (int, error) {
 		c.Close()
 	}
 	return n, err
-}
-
-func (c *boundedConn) Close() error {
-	err := c.Conn.Close()
-	c.releaseOnce.Do(c.release)
-	return err
 }

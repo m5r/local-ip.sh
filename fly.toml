@@ -44,12 +44,23 @@ min_machines_running = 0
 [[services.ports]]
 port = 53
 
+# Each TCP service has a check, so that a deploy waits for the listeners and `fly status` shows their state. A check shows that a TCP connection to the port completes, not that DNS, HTTP or TLS answer on it, and says nothing about UDP. A failing check restarts nothing: it takes the machine out of routing for that service until the check passes again.
+[[services.tcp_checks]]
+grace_period = "10s"
+interval = "15s"
+timeout = "2s"
+
 [[services]]
 protocol = "tcp"
 internal_port = 80
 
 [[services.ports]]
 port = 80
+
+[[services.tcp_checks]]
+grace_period = "10s"
+interval = "15s"
+timeout = "2s"
 
 [[services]]
 protocol = "tcp"
@@ -58,16 +69,10 @@ internal_port = 443
 [[services.ports]]
 port = 443
 
-# [[services.http_checks]]
-# interval = 10000
-# grace_period = "30s"
-# method = "get"
-# path = "/"
-# protocol = "https"
-# timeout = 15000
-# tls_skip_verify = false
-# tls_server_name = "local-ip.sh"
-# [services.http_checks.headers]
+[[services.tcp_checks]]
+grace_period = "10s"
+interval = "15s"
+timeout = "2s"
 
 # One size above the usual shared-cpu-1x / 256 MB: on 2026-11-20 the service needed about 8% of a
 # vCPU against that size's 6.25% allowance and was throttled into slow and lost DNS answers.

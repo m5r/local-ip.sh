@@ -35,9 +35,8 @@ type Config struct {
 	HTTPAddress   string
 	HTTPSAddress  string
 
-	// StateDir holds the ACME account and the certificates, StaticDir the website's files.
-	StateDir  string
-	StaticDir string
+	// StateDir holds the ACME account and the certificates.
+	StateDir string
 
 	// DirectoryURL, ACMEProfile, TrustedRoots and ValidationDelay go to certs.Config unchanged.
 	DirectoryURL    string
@@ -45,6 +44,8 @@ type Config struct {
 	TrustedRoots    *x509.CertPool
 	ValidationDelay time.Duration
 
+	// Region names the region the program runs in, for the log lines of the DNS and web servers; empty leaves it out.
+	Region string
 	Logger zerolog.Logger
 }
 
@@ -73,6 +74,7 @@ func New(cfg Config) (*App, error) {
 		xip.WithDomain(domain),
 		xip.WithEmail(cfg.Email),
 		xip.WithNameServers(cfg.NameServers),
+		xip.WithRegion(cfg.Region),
 		xip.WithLogger(cfg.Logger),
 	}
 	if cfg.ZoneFile != "" {
@@ -100,7 +102,7 @@ func New(cfg Config) (*App, error) {
 
 	webServer := web.NewServer(web.Options{
 		Certificates: certificateSource{manager: manager},
-		StaticDir:    cfg.StaticDir,
+		Region:       cfg.Region,
 		Logger:       cfg.Logger,
 	})
 

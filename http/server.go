@@ -3,16 +3,18 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,9 +22,11 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/urfave/negroni"
+	"golang.org/x/net/netutil"
 )
 
-var flyRegion = os.Getenv("FLY_REGION")
+//go:embed static
+var embedded embed.FS
 
 const (
 	shutdownTimeout   = 3 * time.Second
@@ -31,6 +35,9 @@ const (
 	writeTimeout      = 60 * time.Second
 	idleTimeout       = 120 * time.Second
 	maxHeaderBytes    = 1 << 16
+
+	// maxConnections caps the open connections of each listener. It is a chosen ceiling, not a measured one: low enough that a flood of HTTP connections cannot take the memory the process needs to keep answering DNS.
+	maxConnections = 512
 
 	notIssuedBody = "The certificate has not been issued yet. Try again in a minute.\n"
 )
@@ -56,25 +63,58 @@ type CertificateSource interface {
 // Options configures a Server.
 type Options struct {
 	Certificates CertificateSource
-	// StaticDir holds index.html, styles.css, og.png and favicon.ico.
-	StaticDir string
-	Logger    zerolog.Logger
+	// Files holds index.html, styles.css, og.png and favicon.ico at its root; nil means the files embedded in the package.
+	Files fs.FS
+	// Region names the region the server runs in, which every request's log line carries; empty leaves the field out.
+	Region string
+	Logger zerolog.Logger
 }
 
 // Server is the website on plain HTTP and HTTPS. It holds no certificate itself: every handshake and every request for the pair asks the CertificateSource.
 type Server struct {
-	certificates CertificateSource
-	staticDir    string
-	logger       zerolog.Logger
-	site         http.Handler
+	certificates   CertificateSource
+	files          fs.FS
+	etags          map[string]string
+	region         string
+	logger         zerolog.Logger
+	site           http.Handler
+	maxConnections int
+}
+
+// siteFiles are the files the routes serve.
+var siteFiles = []string{"index.html", "styles.css", "og.png", "favicon.ico"}
+
+// entityTags gives each file of the site a strong ETag from its content, so that a browser can revalidate it: embedded files have no modification time to serve as Last-Modified. A file that cannot be read gets no tag and is left to its route, which answers 404 for it.
+func entityTags(files fs.FS) map[string]string {
+	tags := make(map[string]string, len(siteFiles))
+	for _, name := range siteFiles {
+		content, err := fs.ReadFile(files, name)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(content)
+		tags[name] = `"` + hex.EncodeToString(sum[:16]) + `"`
+	}
+	return tags
 }
 
 // NewServer returns a Server that serves nothing until Run is called.
 func NewServer(opts Options) *Server {
+	files := opts.Files
+	if files == nil {
+		static, err := fs.Sub(embedded, "static")
+		if err != nil {
+			panic(fmt.Sprintf("the embedded files have no static directory: %v", err))
+		}
+		files = static
+	}
 	s := &Server{
-		certificates: opts.Certificates,
-		staticDir:    opts.StaticDir,
-		logger:       opts.Logger,
+		certificates:   opts.Certificates,
+		files:          files,
+		etags:          entityTags(files),
+		region:         opts.Region,
+		logger:         opts.Logger,
+		maxConnections: maxConnections,
 	}
 	s.site = s.newSiteHandler()
 	return s
@@ -91,6 +131,9 @@ func (s *Server) Run(ctx context.Context, httpListener, httpsListener net.Listen
 	if err != nil {
 		return fmt.Errorf("read the HTTPS listener's port: %w", err)
 	}
+	// Below TLS, so that a connection holds its slot from the moment it is accepted, handshake included.
+	httpListener = netutil.LimitListener(httpListener, s.maxConnections)
+	httpsListener = netutil.LimitListener(httpsListener, s.maxConnections)
 
 	httpServer := s.newHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.certificates.SiteCertificate() == nil {
@@ -187,16 +230,16 @@ func (s *Server) newSiteHandler() http.Handler {
 	mux.HandleFunc("GET /og.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-		http.ServeFile(w, r, filepath.Join(s.staticDir, "og.png"))
+		s.serveFile(w, r, "og.png")
 	})
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-		http.ServeFile(w, r, filepath.Join(s.staticDir, "favicon.ico"))
+		s.serveFile(w, r, "favicon.ico")
 	})
 	mux.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		http.ServeFile(w, r, filepath.Join(s.staticDir, "styles.css"))
+		s.serveFile(w, r, "styles.css")
 	})
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -205,12 +248,20 @@ func (s *Server) newSiteHandler() http.Handler {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		http.ServeFile(w, r, filepath.Join(s.staticDir, "index.html"))
+		s.serveFile(w, r, "index.html")
 	})
 
 	n := negroni.New(negroni.HandlerFunc(s.logRequest))
 	n.UseHandler(mux)
 	return n
+}
+
+// serveFile sets the file's ETag before serving it, so that the standard library answers a matching If-None-Match with 304.
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string) {
+	if tag, ok := s.etags[name]; ok {
+		w.Header().Set("ETag", tag)
+	}
+	http.ServeFileFS(w, r, s.files, name)
 }
 
 func (s *Server) servePublishedPair(name, contentType string, half func(Pair) []byte) http.HandlerFunc {
@@ -234,8 +285,8 @@ func (s *Server) logRequest(w http.ResponseWriter, r *http.Request, next http.Ha
 	next(w, r)
 	response := w.(negroni.ResponseWriter)
 	logEvent := s.logger.Debug()
-	if flyRegion != "" {
-		logEvent.Str("FLY_REGION", flyRegion)
+	if s.region != "" {
+		logEvent.Str("FLY_REGION", s.region)
 	}
 	logEvent.Msgf("%s %s %d %s", r.Method, r.URL.Path, response.Status(), time.Since(start))
 }

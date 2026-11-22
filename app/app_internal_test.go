@@ -21,7 +21,6 @@ func TestRunEndsWhenDNSStops(t *testing.T) {
 		HTTPAddress:   "127.0.0.1:0",
 		HTTPSAddress:  "127.0.0.1:0",
 		StateDir:      t.TempDir(),
-		StaticDir:     "../http/static",
 		// Nothing listens there: the manager's orders fail, which must not matter.
 		DirectoryURL: "https://127.0.0.1:1/dir",
 		ACMEProfile:  "default",

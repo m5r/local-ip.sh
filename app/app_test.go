@@ -118,7 +118,6 @@ func newConfig(t *testing.T, logs *logBuffer) app.Config {
 		HTTPAddress:     "127.0.0.1:0",
 		HTTPSAddress:    "127.0.0.1:0",
 		StateDir:        t.TempDir(),
-		StaticDir:       "../http/static",
 		DirectoryURL:    "https://127.0.0.1:1/dir",
 		ACMEProfile:     "default",
 		ValidationDelay: time.Millisecond,
@@ -618,6 +617,40 @@ func checkServingWithoutCertificates(t *testing.T, r *running) {
 	}
 	checkHandshakeFails(t, r.App)
 	r.requireRunning(t)
+}
+
+func TestRegionReachesTheDNSAndWebLogs(t *testing.T) {
+	logs := &logBuffer{}
+	cfg := newConfig(t, logs)
+	cfg.Logger = cfg.Logger.Level(zerolog.DebugLevel)
+	cfg.Region = "ams"
+	r := start(t, cfg, nil)
+
+	checkAddressAnswer(t, r.App)
+	if _, err := get(plainClient(r.App), "http://"+testDomain+"/"); err != nil {
+		t.Fatal(err)
+	}
+	// Both servers wait for their handlers before Run returns, so every log line is written by then.
+	r.stop(t)
+
+	var dnsLines, webLines int
+	for _, entry := range logs.entries(t) {
+		message, _ := entry["message"].(string)
+		switch {
+		case message == "resolved":
+			dnsLines++
+		case strings.HasPrefix(message, "GET / "):
+			webLines++
+		default:
+			continue
+		}
+		if entry["FLY_REGION"] != "ams" {
+			t.Errorf("log line %q has FLY_REGION %v, want ams", message, entry["FLY_REGION"])
+		}
+	}
+	if dnsLines == 0 || webLines == 0 {
+		t.Errorf("found %d resolved lines and %d request lines, want at least one of each", dnsLines, webLines)
+	}
 }
 
 func TestNewReportsBindErrors(t *testing.T) {

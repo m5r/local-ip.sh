@@ -407,6 +407,22 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 			content: "@ MX 10 mail.other.test.\n",
 			records: []string{"example.test. 300 IN MX 10 mail.other.test."},
 		},
+		{
+			name:    "a name and a TXT string that contain $GENERATE",
+			content: "x$GENERATE TXT \"x\"\nwww TXT \"$GENERATE 1-3 host$ A 192.0.2.$\"\n",
+			records: []string{
+				`x$generate.example.test. 300 IN TXT "x"`,
+				`www.example.test. 300 IN TXT "$GENERATE 1-3 host$ A 192.0.2.$"`,
+			},
+		},
+		{
+			name:    "$ORIGIN moves the owners of the records after it",
+			content: "www TXT \"x\"\n$ORIGIN sub.example.test.\nwww TXT \"y\"\n",
+			records: []string{
+				`www.example.test. 300 IN TXT "x"`,
+				`www.sub.example.test. 300 IN TXT "y"`,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -671,6 +687,11 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 		{
 			name:    "F4 TXT record outside the zone",
 			content: "www.other.test. TXT \"x\"\n",
+			want:    recordFault("www.other.test.", "TXT", "owner is outside the zone example.test."),
+		},
+		{
+			name:    "a record after an $ORIGIN outside the zone",
+			content: "$ORIGIN other.test.\nwww TXT \"x\"\n",
 			want:    recordFault("www.other.test.", "TXT", "owner is outside the zone example.test."),
 		},
 		{
@@ -1038,6 +1059,26 @@ func TestParseZoneFileRejectsUnparsableFiles(t *testing.T) {
 					t.Errorf("error %q does not contain %q", err, want)
 				}
 			}
+		})
+	}
+}
+
+func TestParseZoneFileRefusesGenerate(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		line    int
+	}{
+		{name: "in upper case", content: "www TXT \"x\"\n$GENERATE 1-3 host$ A 192.0.2.$\n", line: 2},
+		{name: "in lower case", content: "www TXT \"x\"\n\nwww TXT \"y\"\n$generate 1-3 host$ A 192.0.2.$\n", line: 4},
+		{name: "followed by a tab", content: "$GENERATE\t1-3 host$ A 192.0.2.$\n", line: 1},
+		{name: "in a file with CRLF line endings", content: "www TXT \"x\"\r\n$GENERATE 1-3 host$ A 192.0.2.$\r\n", line: 2},
+		{name: "as the continuation line of a record in parentheses", content: "www TXT ( \"x\"\n$GENERATE \"y\" )\n", line: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expectZoneFileError(t, tt.content, fmt.Sprintf("zone file %s: line %d: $GENERATE is not supported", testZoneFileName, tt.line))
 		})
 	}
 }

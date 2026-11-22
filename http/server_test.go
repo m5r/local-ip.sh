@@ -10,18 +10,22 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -160,15 +164,12 @@ var staticFiles = map[string]string{
 	"favicon.ico": "not really an icon\n",
 }
 
-func writeStaticFiles(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
+func testFiles() fstest.MapFS {
+	files := fstest.MapFS{}
 	for name, content := range staticFiles {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+		files[name] = &fstest.MapFile{Data: []byte(content)}
 	}
-	return dir
+	return files
 }
 
 type runningServer struct {
@@ -193,7 +194,7 @@ func startServer(t *testing.T, source CertificateSource) *runningServer {
 	httpsListener := listen(t)
 	server := NewServer(Options{
 		Certificates: source,
-		StaticDir:    writeStaticFiles(t),
+		Files:        testFiles(),
 		Logger:       zerolog.New(io.Discard),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -480,7 +481,7 @@ func TestRunStopsOnCancel(t *testing.T) {
 	httpListener := listen(t)
 	httpsListener := listen(t)
 	addrs := []string{httpListener.Addr().String(), httpsListener.Addr().String()}
-	server := NewServer(Options{Certificates: &fakeSource{}, StaticDir: writeStaticFiles(t), Logger: zerolog.New(io.Discard)})
+	server := NewServer(Options{Certificates: &fakeSource{}, Files: testFiles(), Logger: zerolog.New(io.Discard)})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx, httpListener, httpsListener) }()
@@ -567,7 +568,7 @@ func TestRunReportsListenerError(t *testing.T) {
 			httpsListener := listen(t)
 			httpAddr := httpListener.Addr().String()
 			httpsAddr := httpsListener.Addr().String()
-			server := NewServer(Options{Certificates: source, StaticDir: writeStaticFiles(t), Logger: zerolog.New(io.Discard)})
+			server := NewServer(Options{Certificates: source, Files: testFiles(), Logger: zerolog.New(io.Discard)})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -612,5 +613,148 @@ func TestRunReportsListenerError(t *testing.T) {
 			}
 			listener.Close()
 		})
+	}
+}
+
+func TestRoutesServeTheEmbeddedFiles(t *testing.T) {
+	server := NewServer(Options{Certificates: &fakeSource{}, Logger: zerolog.New(io.Discard)})
+	routes := map[string]string{
+		"/":            "index.html",
+		"/styles.css":  "styles.css",
+		"/og.png":      "og.png",
+		"/favicon.ico": "favicon.ico",
+	}
+	for route, name := range routes {
+		t.Run(route, func(t *testing.T) {
+			want, err := os.ReadFile(filepath.Join("static", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			server.site.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("GET %s: status %d, want 200", route, recorder.Code)
+			}
+			if !bytes.Equal(recorder.Body.Bytes(), want) {
+				t.Errorf("GET %s: the body is not the content of static/%s", route, name)
+			}
+		})
+	}
+}
+
+func TestRequestLogCarriesTheRegion(t *testing.T) {
+	for _, region := range []string{"ams", ""} {
+		t.Run("region "+strconv.Quote(region), func(t *testing.T) {
+			var buf bytes.Buffer
+			server := NewServer(Options{Certificates: &fakeSource{}, Files: testFiles(), Region: region, Logger: zerolog.New(&buf).Level(zerolog.DebugLevel)})
+
+			server.site.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+			var line map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+				t.Fatalf("the log is not one JSON line: %v\n%s", err, buf.String())
+			}
+			got, present := line["FLY_REGION"]
+			switch {
+			case region == "" && present:
+				t.Errorf("FLY_REGION = %v, want it absent", got)
+			case region != "" && got != region:
+				t.Errorf("FLY_REGION = %v, want %s", got, region)
+			}
+		})
+	}
+}
+
+func TestRunCapsConnections(t *testing.T) {
+	httpListener := listen(t)
+	httpsListener := listen(t)
+	httpAddr := httpListener.Addr().String()
+	server := NewServer(Options{Certificates: &fakeSource{}, Files: testFiles(), Logger: zerolog.New(io.Discard)})
+	server.maxConnections = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Run(ctx, httpListener, httpsListener) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	held, err := net.DialTimeout("tcp", httpAddr, testTimeout)
+	if err != nil {
+		t.Fatalf("dial %s: %v", httpAddr, err)
+	}
+	t.Cleanup(func() { held.Close() })
+	keepConnection(t, held, "the connection at the cap")
+
+	answered := make(chan error, 1)
+	go func() {
+		resp, err := plainClient().Get("http://" + httpAddr + "/")
+		if err == nil {
+			resp.Body.Close()
+		}
+		answered <- err
+	}()
+	select {
+	case err := <-answered:
+		t.Fatalf("a request beyond the cap ended with %v while the connection at the cap was open", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	held.Close()
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("the request beyond the cap failed after the connection at the cap closed: %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the request beyond the cap was not answered after the connection at the cap closed")
+	}
+}
+
+func TestFilesAreRevalidatedByETag(t *testing.T) {
+	server := NewServer(Options{Certificates: &fakeSource{}, Logger: zerolog.New(io.Discard)})
+	for _, route := range []string{"/", "/styles.css", "/og.png", "/favicon.ico"} {
+		t.Run(route, func(t *testing.T) {
+			first := httptest.NewRecorder()
+			server.site.ServeHTTP(first, httptest.NewRequest(http.MethodGet, route, nil))
+			tag := first.Header().Get("ETag")
+			if first.Code != http.StatusOK || len(tag) < 3 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+				t.Fatalf("GET %s: status %d, ETag %q; want 200 with a quoted strong tag", route, first.Code, tag)
+			}
+
+			request := httptest.NewRequest(http.MethodGet, route, nil)
+			request.Header.Set("If-None-Match", tag)
+			second := httptest.NewRecorder()
+			server.site.ServeHTTP(second, request)
+			if second.Code != http.StatusNotModified || second.Body.Len() != 0 {
+				t.Errorf("GET %s with If-None-Match %s: status %d with %d octets of body, want 304 without a body", route, tag, second.Code, second.Body.Len())
+			}
+		})
+	}
+}
+
+func TestETagFollowsTheContent(t *testing.T) {
+	tagOf := func(content string) string {
+		files := testFiles()
+		files["styles.css"] = &fstest.MapFile{Data: []byte(content)}
+		server := NewServer(Options{Certificates: &fakeSource{}, Files: files, Logger: zerolog.New(io.Discard)})
+		recorder := httptest.NewRecorder()
+		server.site.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/styles.css", nil))
+		return recorder.Header().Get("ETag")
+	}
+	one, other := tagOf("body { color: black; }\n"), tagOf("body { color: white; }\n")
+	if one == "" || one == other {
+		t.Errorf("two contents got the tags %q and %q, want two different tags", one, other)
+	}
+}
+
+func TestMissingFileIsNotFound(t *testing.T) {
+	files := testFiles()
+	delete(files, "styles.css")
+	server := NewServer(Options{Certificates: &fakeSource{}, Files: files, Logger: zerolog.New(io.Discard)})
+	recorder := httptest.NewRecorder()
+	server.site.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/styles.css", nil))
+	if recorder.Code != http.StatusNotFound || recorder.Header().Get("ETag") != "" {
+		t.Errorf("GET /styles.css without the file: status %d, ETag %q; want 404 without a tag", recorder.Code, recorder.Header().Get("ETag"))
 	}
 }

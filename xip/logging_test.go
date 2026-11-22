@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -54,14 +55,14 @@ type discardWriter struct{ recordingWriter }
 
 func (discardWriter) WriteMsg(*dns.Msg) error { return nil }
 
-func newLoggingXip(tb testing.TB, domain string, level zerolog.Level, out io.Writer) *Xip {
+func newLoggingXip(tb testing.TB, domain string, level zerolog.Level, out io.Writer, extra ...Option) *Xip {
 	tb.Helper()
-	xip, err := NewXip(
+	xip, err := NewXip(append([]Option{
 		WithDomain(domain),
-		WithEmail("admin@"+domain),
+		WithEmail("admin@" + domain),
 		WithNameServers([]string{"192.0.2.10"}),
 		WithLogger(zerolog.New(out).Level(level).With().Timestamp().Logger()),
-	)
+	}, extra...)...)
 	if err != nil {
 		tb.Fatalf("NewXip: %v", err)
 	}
@@ -228,12 +229,32 @@ func TestHandleDnsRequestLogsResolvedAtDebug(t *testing.T) {
 				}
 			}
 
-			region, present := line["FLY_REGION"]
+			if region, present := line["FLY_REGION"]; present {
+				t.Errorf("FLY_REGION = %v without a region, want it absent", region)
+			}
+		})
+	}
+}
+
+func TestLogResolvedCarriesTheRegion(t *testing.T) {
+	for _, region := range []string{"ams", ""} {
+		t.Run("region "+strconv.Quote(region), func(t *testing.T) {
+			var buf bytes.Buffer
+			xip := newLoggingXip(t, "logging-region.test", zerolog.DebugLevel, &buf, WithRegion(region))
+			offset := buf.Len()
+
+			xip.handleDnsRequest(&recordingWriter{}, newQuery("10-11-12-13.logging-region.test.", dns.TypeA))
+
+			lines := logLinesAfter(t, &buf, offset)
+			if len(lines) != 1 {
+				t.Fatalf("got %d log lines, want 1: %q", len(lines), buf.String()[offset:])
+			}
+			got, present := lines[0]["FLY_REGION"]
 			switch {
-			case flyRegion == "" && present:
-				t.Errorf("FLY_REGION = %v, want it absent", region)
-			case flyRegion != "" && region != flyRegion:
-				t.Errorf("FLY_REGION = %v, want %s", region, flyRegion)
+			case region == "" && present:
+				t.Errorf("FLY_REGION = %v, want it absent", got)
+			case region != "" && got != region:
+				t.Errorf("FLY_REGION = %v, want %s", got, region)
 			}
 		})
 	}

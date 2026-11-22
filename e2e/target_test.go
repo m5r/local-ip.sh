@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
 	"embed"
@@ -273,15 +274,30 @@ func comparableRecord(rr dns.RR) (dns.RR, error) {
 	return unpacked, nil
 }
 
+// generateDirectiveLine returns the number of the first line that begins, at the first column, with $GENERATE in any letter case followed by a space or a tab, the same guard as the server's.
+// It catches the directive as anyone writes it and is not a parser: a directive split with parentheses gets past it, and a continuation line or a line of a quoted string that begins so is refused although it is data; both are accepted costs of not repeating the library's lexer.
+func generateDirectiveLine(content string) (int, bool) {
+	for i, line := range strings.Split(content, "\n") {
+		end := strings.IndexAny(line, " \t")
+		if end >= 0 && strings.EqualFold(line[:end], "$GENERATE") {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
 // loadZoneFile reads from a zone file the cuts, their name servers and the glue for them, and the record sets declared outside every delegation. It does not repeat the server's validation: the suite only needs to know what to expect.
 func loadZoneFile(zoneFilePath string, zone string) (targetZoneFile, error) {
-	file, err := os.Open(zoneFilePath)
+	content, err := os.ReadFile(zoneFilePath)
 	if err != nil {
-		return targetZoneFile{}, fmt.Errorf("opening zone file: %w", err)
+		return targetZoneFile{}, fmt.Errorf("reading zone file: %w", err)
 	}
-	defer file.Close()
+	// The server refuses a file with $GENERATE, so the records the parser would generate from it are none the suite may expect.
+	if line, found := generateDirectiveLine(string(content)); found {
+		return targetZoneFile{}, fmt.Errorf("zone file %s: line %d: $GENERATE is not supported", zoneFilePath, line)
+	}
 
-	zp := dns.NewZoneParser(file, zone, zoneFilePath)
+	zp := dns.NewZoneParser(bytes.NewReader(content), zone, zoneFilePath)
 	zp.SetDefaultTTL(300)
 	byCut := make(map[string]*targetDelegation)
 	var others []dns.RR
@@ -1070,6 +1086,34 @@ func TestLoadTargetZoneFile(t *testing.T) {
 			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
 			zone:    "sub NS ns1.sub\nns1.sub A not-an-address\n",
 			wantErr: []string{"env.XIP_ZONE_FILE", "test.zone", "not-an-address"},
+		},
+		{
+			name:    "$GENERATE in upper case",
+			zoneEnv: zoneFile,
+			files:   zoneFileEntry,
+			zone:    "www TXT \"x\"\n$GENERATE 1-3 host$ A 192.0.2.$\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "test.zone: line 2: $GENERATE is not supported"},
+		},
+		{
+			name:    "$GENERATE in lower case",
+			zoneEnv: zoneFile,
+			files:   zoneFileEntry,
+			zone:    "www TXT \"x\"\n\n$generate 1-3 host$ A 192.0.2.$\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "test.zone: line 3: $GENERATE is not supported"},
+		},
+		{
+			name:     "a name and a TXT string that contain $GENERATE",
+			zoneEnv:  zoneFile,
+			files:    zoneFileEntry,
+			zone:     "x$GENERATE TXT \"x\"\nwww TXT \"$GENERATE 1-3 host$ A 192.0.2.$\"\n",
+			wantSets: [][]string{{`x$generate.example.com. 300 IN TXT "x"`}, {`www.example.com. 300 IN TXT "$GENERATE 1-3 host$ A 192.0.2.$"`}},
+		},
+		{
+			name:     "$ORIGIN moves the owners of the records after it",
+			zoneEnv:  zoneFile,
+			files:    zoneFileEntry,
+			zone:     "www TXT \"x\"\n$ORIGIN sub.example.com.\nwww TXT \"y\"\n",
+			wantSets: [][]string{{`www.example.com. 300 IN TXT "x"`}, {`www.sub.example.com. 300 IN TXT "y"`}},
 		},
 	}
 

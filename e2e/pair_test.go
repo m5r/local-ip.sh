@@ -146,9 +146,7 @@ func parsePrivateKey(data []byte) (crypto.Signer, error) {
 	return signer, nil
 }
 
-// matchingKeyPair tolerates one renewal racing the download: the server replaces the two files one
-// after the other, so well-formed files whose keys differ are downloaded once more and only a
-// second mismatch fails. A download error (such as malformed content) is final and never retried.
+// matchingKeyPair tolerates one renewal racing the download: each file is served from one consistent pair, but the certificate and the key are two requests, and a renewal between them hands out halves of two pairs. Well-formed files whose keys differ are therefore downloaded once more, and only a second mismatch fails. A download error (such as malformed content) is final and never retried.
 func matchingKeyPair(download func() (keyPair, error)) (keyPair, error) {
 	for attempt := 1; ; attempt++ {
 		pair, err := download()

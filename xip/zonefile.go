@@ -1,6 +1,7 @@
 package xip
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"maps"
@@ -154,7 +155,15 @@ func recordError(file string, rr dns.RR, format string, args ...any) error {
 
 // readZoneRecords parses the file, canonicalises names and applies the rules that concern a record on its own or against the records before it (F1 to F8).
 func readZoneRecords(r io.Reader, file string, apex string) ([]dns.RR, error) {
-	zp := dns.NewZoneParser(r, apex, file)
+	content, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading zone file %s: %w", file, err)
+	}
+	if line, found := generateDirectiveLine(string(content)); found {
+		return nil, fmt.Errorf("zone file %s: line %d: $GENERATE is not supported", file, line)
+	}
+
+	zp := dns.NewZoneParser(bytes.NewReader(content), apex, file)
 	zp.SetDefaultTTL(zoneFileDefaultTTL)
 
 	var records []dns.RR
@@ -210,6 +219,18 @@ func readZoneRecords(r io.Reader, file string, apex string) ([]dns.RR, error) {
 		return nil, fmt.Errorf("parsing zone file %s: %w", file, err)
 	}
 	return records, nil
+}
+
+// generateDirectiveLine returns the number of the first line that begins, at the first column, with $GENERATE in any letter case followed by a space or a tab: the parser expands that directive by itself into records with a TTL of 3600 seconds whatever $TTL and the default TTL say, which would surprise the operator.
+// It is a guard that catches the directive as anyone writes it, not a parser: a directive split with parentheses gets past it, and a continuation line or a line of a quoted string that begins so is refused although it is data; both are accepted costs of not repeating the library's lexer.
+func generateDirectiveLine(content string) (int, bool) {
+	for i, line := range strings.Split(content, "\n") {
+		end := strings.IndexAny(line, " \t")
+		if end >= 0 && strings.EqualFold(line[:end], "$GENERATE") {
+			return i + 1, true
+		}
+	}
+	return 0, false
 }
 
 // duplicateKey returns the record in wire format with its TTL set to 0, uncompressed: two records are duplicates when they would be sent the same apart from their TTL.

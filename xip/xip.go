@@ -23,6 +23,7 @@ type Xip struct {
 	zoneFile            string
 	zone                *zone
 	logger              zerolog.Logger
+	region              string
 	challengeName       string
 	challengeMu         sync.RWMutex
 	challengeValues     map[string]struct{}
@@ -54,14 +55,19 @@ func WithLogger(logger zerolog.Logger) Option {
 	}
 }
 
+// WithRegion names the region the server runs in, which every resolved query's log line carries; empty leaves the field out.
+func WithRegion(region string) Option {
+	return func(x *Xip) {
+		x.region = region
+	}
+}
+
 // WithNameServers sets the IPv4 addresses of the zone's name servers, served as ns1, ns2 and so on in the order given, and as the A records of the apex.
 func WithNameServers(addresses []string) Option {
 	return func(x *Xip) {
 		x.nameServerAddresses = slices.Clone(addresses)
 	}
 }
-
-var flyRegion = os.Getenv("FLY_REGION")
 
 func chunkBy(str string, chunkSize int) (chunks []string) {
 	for chunkSize < len(str) {
@@ -198,8 +204,8 @@ func (xip *Xip) logResolved(message *dns.Msg) {
 	}
 	event.Strs("answers", answers)
 
-	if flyRegion != "" {
-		event.Str("FLY_REGION", flyRegion)
+	if xip.region != "" {
+		event.Str("FLY_REGION", xip.region)
 	}
 	event.Msg("resolved")
 }

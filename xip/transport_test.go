@@ -457,13 +457,13 @@ func acceptAsync(l net.Listener) <-chan net.Conn {
 	return accepted
 }
 
-func TestBoundedListenerCapsConnections(t *testing.T) {
+func TestTCPListenerCapsConnections(t *testing.T) {
 	const connectionCap = 2
 	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	listener := newBoundedListener(inner, connectionCap)
+	listener := newTCPListener(inner, connectionCap)
 	t.Cleanup(func() { listener.Close() })
 	// The kernel completes these connections in its accept queue whether or not Accept is called.
 	for range connectionCap + 2 {
@@ -516,11 +516,101 @@ func TestBoundedListenerCapsConnections(t *testing.T) {
 	})
 }
 
-func TestBoundedConnWriteDeadline(t *testing.T) {
+func TestTCPListenerReportsOnlyAcceptErrorsItDidNotCause(t *testing.T) {
+	t.Run("the listener closed from outside", func(t *testing.T) {
+		inner, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener := newTCPListener(inner, 1)
+		inner.Close()
+
+		if _, err := listener.Accept(); err == nil {
+			t.Fatal("Accept on a closed listener succeeded")
+		}
+		select {
+		case err := <-listener.failed:
+			if !errors.Is(err, net.ErrClosed) {
+				t.Errorf("reported %v, want the accept error", err)
+			}
+		default:
+			t.Error("the accept error was not reported")
+		}
+	})
+
+	t.Run("its own Close, with an Accept waiting for a slot", func(t *testing.T) {
+		inner, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener := newTCPListener(inner, 1)
+		t.Cleanup(func() { listener.Close() })
+		dialTCP(t, inner.Addr().String())
+		dialTCP(t, inner.Addr().String())
+
+		select {
+		case conn, ok := <-acceptAsync(listener):
+			if !ok {
+				t.Fatal("Accept failed below the cap")
+			}
+			t.Cleanup(func() { conn.Close() })
+		case <-time.After(10 * time.Second):
+			t.Fatal("Accept did not return below the cap")
+		}
+		waiting := acceptAsync(listener)
+		select {
+		case <-waiting:
+			t.Fatal("Accept returned with the cap reached")
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		listener.Close()
+		select {
+		case conn, ok := <-waiting:
+			if ok {
+				conn.Close()
+				t.Fatal("the waiting Accept returned a connection after Close")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the waiting Accept did not return after Close")
+		}
+		select {
+		case err := <-listener.failed:
+			t.Errorf("Close was reported as the failure %v", err)
+		default:
+		}
+	})
+
+	t.Run("another error after its own Close", func(t *testing.T) {
+		failure := errors.New("accept failed")
+		listener := newTCPListener(failingListener{err: failure}, 1)
+		listener.Close()
+
+		if _, err := listener.Accept(); !errors.Is(err, failure) {
+			t.Fatalf("Accept returned %v, want %v", err, failure)
+		}
+		select {
+		case err := <-listener.failed:
+			if !errors.Is(err, failure) {
+				t.Errorf("reported %v, want %v", err, failure)
+			}
+		default:
+			t.Error("an error that Close did not cause was not reported")
+		}
+	})
+}
+
+// failingListener fails every Accept with err, whether or not it has been closed.
+type failingListener struct{ err error }
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+
+func TestDeadlineConnWriteDeadline(t *testing.T) {
 	server, client := net.Pipe()
 	t.Cleanup(func() { client.Close() })
-	released := 0
-	conn := &boundedConn{Conn: server, release: func() { released++ }, writeTimeout: 50 * time.Millisecond}
+	conn := &deadlineConn{Conn: server, writeTimeout: 50 * time.Millisecond}
 
 	// Nothing reads client, so a write on a synchronous pipe can only end at its deadline.
 	done := make(chan error, 1)
@@ -537,15 +627,8 @@ func TestBoundedConnWriteDeadline(t *testing.T) {
 		t.Fatal("Write to a peer that never reads did not return within 10 seconds")
 	}
 
-	if released != 1 {
-		t.Errorf("the slot was released %d times after the failed write, want 1", released)
-	}
 	if _, err := server.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
 		t.Errorf("writing on the pipe after the failed write returned %v, want it closed", err)
-	}
-	conn.Close()
-	if released != 1 {
-		t.Errorf("the slot was released %d times after a second Close, want 1", released)
 	}
 }
 
