@@ -730,7 +730,7 @@ func TestProblemOf(t *testing.T) {
 	if got, ok := problemOf(fmt.Errorf("ordering: %w", problem)); !ok || got.Type != problem.Type {
 		t.Errorf("value: problemOf = %+v, %v", got, ok)
 	}
-	if got, ok := problemOf(fmt.Errorf("ordering: %w", &problem)); !ok || got.Type != problem.Type {
+	if got, ok := problemOf(wrapped{&problem}); !ok || got.Type != problem.Type {
 		t.Errorf("pointer: problemOf = %+v, %v", got, ok)
 	}
 	if got, ok := problemOf(wrapped{(*acme.Problem)(nil)}); ok {

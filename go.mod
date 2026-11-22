@@ -1,6 +1,6 @@
 module local-ip.sh
 
-go 1.26.0
+go 1.27.4
 
 require (
 	github.com/letsencrypt/pebble/v2 v2.10.3

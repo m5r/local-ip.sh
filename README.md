@@ -109,7 +109,7 @@ A [reference docker compose file](./compose.yml) is available for deployments us
 
 ## Testing
 
-- `make check` fails if any Go file is not `gofmt`-clean, then runs `go vet` and `go test -race` on every package. It only looks at files git knows about (tracked, or untracked and not ignored), and it needs no network: the certificate tests run an ACME server inside the test process, and the live suites are skipped unless `E2E_FLY_CONFIG` or `E2E_LIFECYCLE_FLY_CONFIG` is set.
+- `make check` fails if any Go file is not `gofmt`-clean, then runs `go vet` and `go test -race` on every package. It only looks at files git knows about (tracked, or untracked and not ignored), and it needs no network: the certificate tests run an ACME server inside the test process, and the live suites are skipped unless `E2E_FLY_CONFIG` or `E2E_LIFECYCLE_FLY_CONFIG` is set. The Gitea workflow in `.gitea/workflows/check.yml` runs `make check` on every push.
 - `make e2e` runs the live end-to-end suite against the staging deployment described by `fly.staging.toml` (the default).
 - `make e2e FLY_CONFIG=fly.toml` runs the same suite against production.
 - `make e2e-lifecycle` asks the staging deployment for a certificate renewal through the Fly Machines API and checks that both certificates change while DNS keeps answering, then restarts the machine and checks that the same certificates are served again. It needs `FLY_API_TOKEN`, preferably a token limited to the staging app (`fly tokens create deploy -a local-ip-staging -x 1h` prints one), and it refuses every deployment other than the staging one.
@@ -127,4 +127,4 @@ You will essentially need to:
  - configure `local-ip.sh` with the domain, admin email address, and nameservers
  - ensure you have some sort of persistent storage for the state directory (`./state`, `/local-ip/state` in the Docker image), this is where the ACME account and certificate files are stored, you don't want to lose this between deployments
 
-The Dockerfile pins both base images by the digest of their multi-arch index; to move them forward, read each new digest from the first `Digest:` line of `docker buildx imagetools inspect golang:<version>-trixie` and `docker buildx imagetools inspect gcr.io/distroless/static-debian13`, and write the version and the digests into its `FROM` lines.
+The Dockerfile pins both base images by the digest of their multi-arch index; to move them forward, read each new digest from the first `Digest:` line of `docker buildx imagetools inspect golang:<version>-trixie` and `docker buildx imagetools inspect gcr.io/distroless/static-debian13`, and write the version and the digests into its `FROM` lines; the `go` line of `go.mod` moves with the Go version, since the image build refuses an older Go than that line and the workflow installs that version.
