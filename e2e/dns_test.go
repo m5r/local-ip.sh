@@ -1200,7 +1200,7 @@ func checkProbeName(tg *target, qname, askedBy string) error {
 
 func delegationChecks(t *testing.T, tg *target) {
 	if len(tg.delegations) == 0 {
-		t.Skipf("%s declares no delegations in its zone file", tg.app)
+		t.Skipf("%s declares no delegations in its zone file", tg.name)
 	}
 	noError := []int{dns.RcodeSuccess}
 
@@ -2246,12 +2246,12 @@ func TestNameOfWireLength(t *testing.T) {
 
 // TestAuthoritativeCases holds the case list of each committed target to the flag rules of the zone: AA set on every answer from the zone, clear on every refusal, and NXDOMAIN only for a name too long to have a child.
 func TestAuthoritativeCases(t *testing.T) {
-	for _, configPath := range []string{"../fly.toml", "../fly.staging.toml"} {
-		t.Run(configPath, func(t *testing.T) {
-			tg, err := loadTarget(configPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+	production, err := loadFlyTarget("../fly.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range []*target{production, capturedRigTarget(t)} {
+		t.Run(tg.name, func(t *testing.T) {
 			cases := authoritativeCases(tg, nil)
 			names := make(map[string]bool)
 			for _, tc := range cases {

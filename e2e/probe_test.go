@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// What the prober's numbers mean: one lost probe can be the network between the test and the server and proves nothing, and whether the process restarted is read from the machine's events, not from here. The prober is there to catch a server that goes silent while it stays up (a handler blocked while a challenge is published, for instance), which is why the lifecycle test fails only when the longest silence reaches proberSilenceLimit and otherwise just reports the totals.
+// What the prober's numbers mean: one lost probe can be the network between the test and the server and proves nothing, and whether the process restarted is read from the container's state, not from here. The prober is there to catch a server that goes silent while it stays up (a handler blocked while a challenge is published, for instance), which is why the lifecycle test fails only when the longest silence reaches proberSilenceLimit and otherwise just reports the totals.
 const (
 	proberInterval     = 250 * time.Millisecond
 	proberTimeout      = time.Second
@@ -55,10 +56,10 @@ func unansweredProbes(probes []probe) int {
 	return n
 }
 
-// startProber sends a query for name (type A) to server every 250 milliseconds until stop is called, each on a socket of its own, with one second to be answered and no retry. A probe is answered when the reply is NOERROR with exactly one A record equal to want. stop waits for the probes in flight and returns all of them in sending order with end, the moment the prober stopped sending: no probe was sent after it. It is registered with t.Cleanup, so a test that fails early leaves nothing running, and calling it more than once is safe.
+// startProber sends a query for name and qtype to server every 250 milliseconds until stop is called, each on a socket of its own, with one second to be answered and no retry. A probe is answered when the reply is NOERROR, echoes the question and satisfies answered. stop waits for the probes in flight and returns all of them in sending order with end, the moment the prober stopped sending: no probe was sent after it. It is registered with t.Cleanup, so a test that fails early leaves nothing running, and calling it more than once is safe.
 //
 // Each probe runs in a goroutine of its own so that one waiting for its timeout does not delay the next: at most five are in flight. The existing exchange helper retries, which would hide exactly the silences this measures.
-func startProber(t *testing.T, server netip.AddrPort, name string, want netip.Addr) (stop func() (probes []probe, end time.Time)) {
+func startProber(t *testing.T, server netip.AddrPort, name string, qtype uint16, answered func(*dns.Msg) bool) (stop func() (probes []probe, end time.Time)) {
 	t.Helper()
 	fqdn := dns.Fqdn(name)
 	address := server.String()
@@ -75,9 +76,9 @@ func startProber(t *testing.T, server netip.AddrPort, name string, want netip.Ad
 		sent = append(sent, p)
 		mu.Unlock()
 		inFlight.Go(func() {
-			answered := probeOnce(address, fqdn, want)
+			ok := probeOnce(address, fqdn, qtype, answered)
 			mu.Lock()
-			p.answered = answered
+			p.answered = ok
 			mu.Unlock()
 		})
 	}
@@ -121,24 +122,39 @@ func startProber(t *testing.T, server netip.AddrPort, name string, want netip.Ad
 }
 
 // probeOnce has its own deadline and ignores the test's context, so that stop can let the probes in flight finish instead of counting them as lost.
-func probeOnce(address, fqdn string, want netip.Addr) bool {
+func probeOnce(address, fqdn string, qtype uint16, answered func(*dns.Msg) bool) bool {
 	query := new(dns.Msg)
-	query.SetQuestion(fqdn, dns.TypeA)
+	query.SetQuestion(fqdn, qtype)
 	query.RecursionDesired = false
 
 	ctx, cancel := context.WithTimeout(context.Background(), proberTimeout)
 	defer cancel()
 	client := &dns.Client{Net: "udp", Timeout: proberTimeout}
 	resp, _, err := client.ExchangeContext(ctx, query, address)
-	if err != nil || resp.Rcode != dns.RcodeSuccess || checkQuestionEcho(resp, fqdn, dns.TypeA) != nil || len(resp.Answer) != 1 {
-		return false
+	return err == nil && resp.Rcode == dns.RcodeSuccess && checkQuestionEcho(resp, fqdn, qtype) == nil && answered(resp)
+}
+
+// answersAddress accepts a reply whose answer is exactly one A record equal to want.
+func answersAddress(want netip.Addr) func(*dns.Msg) bool {
+	return func(resp *dns.Msg) bool {
+		if len(resp.Answer) != 1 {
+			return false
+		}
+		record, ok := resp.Answer[0].(*dns.A)
+		if !ok {
+			return false
+		}
+		got, ok := netip.AddrFromSlice(record.A)
+		return ok && got.Unmap() == want
 	}
-	record, ok := resp.Answer[0].(*dns.A)
-	if !ok {
-		return false
-	}
-	got, ok := netip.AddrFromSlice(record.A)
-	return ok && got.Unmap() == want
+}
+
+// answersTXT accepts a reply with at least one TXT record in its answer.
+func answersTXT(resp *dns.Msg) bool {
+	return slices.ContainsFunc(resp.Answer, func(rr dns.RR) bool {
+		_, ok := rr.(*dns.TXT)
+		return ok
+	})
 }
 
 func TestLongestSilence(t *testing.T) {
@@ -256,7 +272,7 @@ func TestProber(t *testing.T) {
 	}
 	server, count, received := startResponder(t, want, other, mode)
 
-	stop := startProber(t, server, "10-0-0-1.example.test", want)
+	stop := startProber(t, server, "10-0-0-1.example.test", dns.TypeA, answersAddress(want))
 
 	deadline := time.After(10 * time.Second)
 	for waiting := true; waiting; {
@@ -298,5 +314,26 @@ func TestProber(t *testing.T) {
 		if again[i] != probes[i] {
 			t.Errorf("second stop returned probe %d as %+v, first returned %+v", i+1, again[i], probes[i])
 		}
+	}
+}
+
+func TestAnswersTXT(t *testing.T) {
+	const name = "_acme-challenge.example.test."
+	tests := []struct {
+		name   string
+		answer []string
+		want   bool
+	}{
+		{name: "a challenge value", answer: []string{name + ` 0 IN TXT "value"`}, want: true},
+		{name: "two challenge values", answer: []string{name + ` 0 IN TXT "one"`, name + ` 0 IN TXT "two"`}, want: true},
+		{name: "no record", answer: nil, want: false},
+		{name: "a record of another type", answer: []string{name + ` 0 IN A 192.0.2.1`}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := answersTXT(testReply(t, name, dns.TypeTXT, dns.RcodeSuccess, tt.answer, nil, nil)); got != tt.want {
+				t.Errorf("answersTXT = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }

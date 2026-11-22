@@ -75,15 +75,6 @@ func config() (app.Config, error) {
 		dnsUDPHost = "fly-global-services"
 	}
 
-	staging, err := boolOption("staging")
-	if err != nil {
-		return app.Config{}, err
-	}
-	directoryURL := certs.LetsEncryptProduction
-	if staging {
-		directoryURL = certs.LetsEncryptStaging
-	}
-
 	ports := map[string]string{}
 	for _, name := range []string{"dns-port", "http-port", "https-port"} {
 		port, err := portOption(name)
@@ -108,21 +99,11 @@ func config() (app.Config, error) {
 		HTTPAddress:   ":" + ports["http-port"],
 		HTTPSAddress:  ":" + ports["https-port"],
 		StateDir:      viper.GetString("state-dir"),
-		DirectoryURL:  directoryURL,
+		DirectoryURL:  viper.GetString("acme-directory"),
 		ACMEProfile:   viper.GetString("acme-profile"),
 		Region:        os.Getenv("FLY_REGION"),
 		Logger:        utils.Logger,
 	}, nil
-}
-
-// boolOption parses the effective text of a boolean option, whether it comes from the flag, the environment or the default.
-func boolOption(name string) (bool, error) {
-	text := viper.GetString(name)
-	value, err := strconv.ParseBool(text)
-	if err != nil {
-		return false, invalidOption(name, text, err)
-	}
-	return value, nil
 }
 
 // portOption parses the effective text of a port option, from the flag or the environment alike, as a decimal number from 0 to 65535: a leading zero is decimal (010 is port 10), and neither a base prefix nor a service name such as "ssh", which net.Listen would take, is accepted. The port flags are strings so that this is the only parser.
@@ -159,12 +140,12 @@ func defineFlags(cmd *cobra.Command) error {
 	flags.String("dns-port", "53", "Port for the DNS server")
 	flags.String("http-port", "80", "Port for the HTTP server")
 	flags.String("https-port", "443", "Port for the HTTPS server")
-	flags.Bool("staging", false, "Enable to use the Let's Encrypt staging environment to obtain certificates")
 	flags.String("domain", "", "Root domain (required)")
 	flags.String("email", "", "ACME account email address (required)")
 	flags.String("nameservers", "", "List of nameservers separated by commas (required)")
 	flags.String("zone-file", "", "Path to a zone file declaring delegations (optional)")
 	flags.String("state-dir", "./state", "Directory for the ACME account and the certificates")
+	flags.String("acme-directory", certs.LetsEncryptProduction, "HTTPS URL of the ACME directory of the certificate authority")
 	flags.String("acme-profile", "", "ACME certificate profile to request (optional, the certificate authority chooses by default)")
 	return viper.BindPFlags(flags)
 }

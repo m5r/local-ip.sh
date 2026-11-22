@@ -2,18 +2,14 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"crypto/x509"
-	"embed"
 	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"maps"
 	"net/mail"
 	"net/netip"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -24,21 +20,35 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-//go:embed testdata/*.pem
-var stagingRootFiles embed.FS
-
 const asciiWhitespace = " \t\r\n\v\f"
 
 type target struct {
-	app         string
+	// name says what the target is in log lines and messages: the Fly app or the compose project.
+	name        string
 	domain      string
 	nameServers []netip.Addr
 	email       string
-	stagingCA   bool
+	// publiclyDelegated is whether the domain is delegated to the name servers on the public internet, so that public resolvers can answer for it.
+	publiclyDelegated bool
+	// roots verify the certificates the target serves and publishes.
 	roots       *x509.CertPool
 	rname       string
 	delegations []targetDelegation
 	recordSets  []targetRecordSet
+}
+
+// targetSource is what a reader takes from a deployment's description for newTarget.
+type targetSource struct {
+	// path is the description's file, which every error names.
+	path string
+	// envKeys is the prefix that, followed by a variable's name, names the variable's place in the description.
+	envKeys string
+	name    string
+	env     map[string]any
+	// files maps the path at which the server reads a file the deployment delivers to the path of that file on this machine.
+	files             map[string]string
+	publiclyDelegated bool
+	roots             *x509.CertPool
 }
 
 // targetDelegation is a zone cut declared in the target's zone file, as the suite reads it
@@ -87,7 +97,8 @@ func emailToRname(email string) string {
 	return local + "." + email[at+1:] + "."
 }
 
-func loadTarget(configPath string) (*target, error) {
+// loadFlyTarget reads the target from a Fly config: a deployment on Fly is delegated on the public internet and serves certificates the system trusts.
+func loadFlyTarget(configPath string) (*target, error) {
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading Fly config %s: %w", configPath, err)
@@ -109,117 +120,123 @@ func loadTarget(configPath string) (*target, error) {
 		return fmt.Errorf("%s: %s: "+format, append([]any{configPath, key}, args...)...)
 	}
 
-	tg := &target{}
-
 	app, err := requiredString(raw.App, raw.App != nil)
 	if err != nil {
 		return nil, invalid("app", "%w", err)
 	}
-	tg.app = app
 
-	domain, err := requiredEnv(raw.Env, "XIP_DOMAIN")
+	files := make(map[string]string, len(raw.Files))
+	for i, file := range raw.Files {
+		guestPath, err := requiredString(file.GuestPath, file.GuestPath != nil)
+		if err != nil {
+			return nil, invalid(fmt.Sprintf("files[%d].guest_path", i), "%w", err)
+		}
+		localPath, err := requiredString(file.LocalPath, file.LocalPath != nil)
+		if err != nil {
+			return nil, invalid(fmt.Sprintf("files[%d].local_path", i), "%w", err)
+		}
+		if _, twice := files[guestPath]; twice {
+			return nil, invalid(fmt.Sprintf("files[%d].guest_path", i), "%q is the guest path of an earlier entry too", guestPath)
+		}
+		if !filepath.IsAbs(localPath) {
+			localPath = filepath.Join(filepath.Dir(configPath), localPath)
+		}
+		files[guestPath] = localPath
+	}
+
+	roots, err := x509.SystemCertPool()
 	if err != nil {
-		return nil, invalid("env.XIP_DOMAIN", "%w", err)
+		return nil, fmt.Errorf("loading the system's trusted roots for %s: %w", configPath, err)
+	}
+	return newTarget(targetSource{
+		path:              configPath,
+		envKeys:           "env.",
+		name:              "Fly app " + app,
+		env:               raw.Env,
+		files:             files,
+		publiclyDelegated: true,
+		roots:             roots,
+	})
+}
+
+// newTarget checks the server's environment and the zone file it is delivered, and turns them into the target the suite expects to find.
+func newTarget(src targetSource) (*target, error) {
+	invalid := func(variable, format string, args ...any) error {
+		return fmt.Errorf("%s: %s%s: "+format, append([]any{src.path, src.envKeys, variable}, args...)...)
+	}
+	tg := &target{name: src.name, publiclyDelegated: src.publiclyDelegated, roots: src.roots}
+
+	domain, err := requiredEnv(src.env, "XIP_DOMAIN")
+	if err != nil {
+		return nil, invalid("XIP_DOMAIN", "%w", err)
 	}
 	domain = strings.TrimSuffix(strings.ToLower(domain), ".")
 	if domain == "" {
-		return nil, invalid("env.XIP_DOMAIN", "is empty after removing the trailing dot")
+		return nil, invalid("XIP_DOMAIN", "is empty after removing the trailing dot")
 	}
 	if _, ok := dns.IsDomainName(domain); !ok {
-		return nil, invalid("env.XIP_DOMAIN", "%q is not a valid domain name", domain)
+		return nil, invalid("XIP_DOMAIN", "%q is not a valid domain name", domain)
 	}
 	tg.domain = domain
 
-	nameServers, err := requiredEnv(raw.Env, "XIP_NAMESERVERS")
+	nameServers, err := requiredEnv(src.env, "XIP_NAMESERVERS")
 	if err != nil {
-		return nil, invalid("env.XIP_NAMESERVERS", "%w", err)
+		return nil, invalid("XIP_NAMESERVERS", "%w", err)
 	}
 	for i, element := range strings.Split(nameServers, ",") {
 		element = strings.Trim(element, asciiWhitespace)
 		if element == "" {
-			return nil, invalid("env.XIP_NAMESERVERS", "element %d is empty", i+1)
+			return nil, invalid("XIP_NAMESERVERS", "element %d is empty", i+1)
 		}
 		addr, err := netip.ParseAddr(element)
 		if err != nil {
-			return nil, invalid("env.XIP_NAMESERVERS", "element %d: %w", i+1, err)
+			return nil, invalid("XIP_NAMESERVERS", "element %d: %w", i+1, err)
 		}
 		if !addr.Is4() {
-			return nil, invalid("env.XIP_NAMESERVERS", "element %d: %s is not an IPv4 address", i+1, addr)
+			return nil, invalid("XIP_NAMESERVERS", "element %d: %s is not an IPv4 address", i+1, addr)
 		}
 		tg.nameServers = append(tg.nameServers, addr)
 	}
 
-	email, err := requiredEnv(raw.Env, "XIP_EMAIL")
+	email, err := requiredEnv(src.env, "XIP_EMAIL")
 	if err != nil {
-		return nil, invalid("env.XIP_EMAIL", "%w", err)
+		return nil, invalid("XIP_EMAIL", "%w", err)
 	}
 	parsed, err := mail.ParseAddress(email)
 	if err != nil {
-		return nil, invalid("env.XIP_EMAIL", "%w", err)
+		return nil, invalid("XIP_EMAIL", "%w", err)
 	}
 	if parsed.Address != email {
-		return nil, invalid("env.XIP_EMAIL", "%q must be a bare address, not %q", parsed.Address, email)
+		return nil, invalid("XIP_EMAIL", "%q must be a bare address, not %q", parsed.Address, email)
 	}
 	tg.email = email
 	tg.rname, err = wireCanonicalName(emailToRname(email))
 	if err != nil {
-		return nil, invalid("env.XIP_EMAIL", "%q cannot be the RNAME of the SOA record: %w", email, err)
+		return nil, invalid("XIP_EMAIL", "%q cannot be the RNAME of the SOA record: %w", email, err)
 	}
 
-	staging, present, err := optionalEnv(raw.Env, "XIP_STAGING")
+	zoneFile, present, err := optionalEnv(src.env, "XIP_ZONE_FILE")
 	if err != nil {
-		return nil, invalid("env.XIP_STAGING", "%w", err)
-	}
-	if present {
-		tg.stagingCA, err = strconv.ParseBool(staging)
-		if err != nil {
-			return nil, invalid("env.XIP_STAGING", "%w", err)
-		}
-	}
-
-	if tg.stagingCA {
-		tg.roots, err = stagingRootPool()
-	} else {
-		tg.roots, err = x509.SystemCertPool()
-	}
-	if err != nil {
-		return nil, fmt.Errorf("loading trust roots for %s: %w", configPath, err)
-	}
-
-	zoneFile, present, err := optionalEnv(raw.Env, "XIP_ZONE_FILE")
-	if err != nil {
-		return nil, invalid("env.XIP_ZONE_FILE", "%w", err)
+		return nil, invalid("XIP_ZONE_FILE", "%w", err)
 	}
 	if present && zoneFile != "" {
-		var localPaths []string
-		for _, file := range raw.Files {
-			guestPath, ok := file.GuestPath.(string)
-			if !ok || strings.Trim(guestPath, asciiWhitespace) != zoneFile {
-				continue
-			}
-			localPath, _ := file.LocalPath.(string)
-			localPaths = append(localPaths, strings.Trim(localPath, asciiWhitespace))
-		}
-		if len(localPaths) != 1 || localPaths[0] == "" {
-			return nil, invalid("env.XIP_ZONE_FILE", "%q must be the guest_path of exactly one [[files]] entry with a non-empty local_path, found %d entries with local paths %q", zoneFile, len(localPaths), localPaths)
-		}
-		localPath := localPaths[0]
-		if !filepath.IsAbs(localPath) {
-			localPath = filepath.Join(filepath.Dir(configPath), localPath)
+		localPath, delivered := src.files[zoneFile]
+		if !delivered {
+			return nil, invalid("XIP_ZONE_FILE", "%q is not the path of a file the deployment delivers to the server", zoneFile)
 		}
 		zf, err := loadZoneFile(localPath, tg.zone())
 		if err != nil {
-			return nil, fmt.Errorf("%s: env.XIP_ZONE_FILE: %w", configPath, err)
+			return nil, invalid("XIP_ZONE_FILE", "%w", err)
 		}
 		tg.delegations = zf.delegations
 		tg.recordSets = zf.recordSets
 	}
 
 	if err := checkProbes(tg); err != nil {
-		return nil, fmt.Errorf("%s: %w", configPath, err)
+		return nil, fmt.Errorf("%s: %w", src.path, err)
 	}
 	if err := checkTransportSets(tg); err != nil {
-		return nil, fmt.Errorf("%s: %w", configPath, err)
+		return nil, fmt.Errorf("%s: %w", src.path, err)
 	}
 
 	return tg, nil
@@ -406,55 +423,14 @@ func optionalEnv(env map[string]any, key string) (string, bool, error) {
 	return strings.Trim(s, asciiWhitespace), true, nil
 }
 
-func stagingRoots() ([]*x509.Certificate, error) {
-	names, err := stagingRootFiles.ReadDir("testdata")
-	if err != nil {
-		return nil, fmt.Errorf("listing vendored staging roots: %w", err)
-	}
-
-	var roots []*x509.Certificate
-	for _, entry := range names {
-		name := path.Join("testdata", entry.Name())
-		content, err := stagingRootFiles.ReadFile(name)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", name, err)
-		}
-		block, rest := pem.Decode(content)
-		if block == nil || block.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("%s: no PEM certificate block", name)
-		}
-		if len(strings.Trim(string(rest), asciiWhitespace)) != 0 {
-			return nil, fmt.Errorf("%s: must contain exactly one certificate", name)
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", name, err)
-		}
-		roots = append(roots, cert)
-	}
-	return roots, nil
-}
-
-func stagingRootPool() (*x509.CertPool, error) {
-	roots, err := stagingRoots()
-	if err != nil {
-		return nil, err
-	}
-	pool := x509.NewCertPool()
-	for _, root := range roots {
-		pool.AddCert(root)
-	}
-	return pool, nil
-}
-
 func TestLoadProductionConfig(t *testing.T) {
-	tg, err := loadTarget(filepath.Join("..", "fly.toml"))
+	tg, err := loadFlyTarget(filepath.Join("..", "fly.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if tg.app != "local-ip" {
-		t.Errorf("app = %q, want %q", tg.app, "local-ip")
+	if tg.name != "Fly app local-ip" {
+		t.Errorf("name = %q, want %q", tg.name, "Fly app local-ip")
 	}
 	if tg.domain != "local-ip.sh" {
 		t.Errorf("domain = %q, want %q", tg.domain, "local-ip.sh")
@@ -463,8 +439,8 @@ func TestLoadProductionConfig(t *testing.T) {
 	if !slices.Equal(tg.nameServers, want) {
 		t.Errorf("nameServers = %v, want %v", tg.nameServers, want)
 	}
-	if tg.stagingCA {
-		t.Error("stagingCA = true, want false")
+	if !tg.publiclyDelegated {
+		t.Error("publiclyDelegated = false, want true")
 	}
 	if got, want := tg.soaRname(), "admin.local-ip.sh."; got != want {
 		t.Errorf("soaRname = %q, want %q", got, want)
@@ -531,40 +507,30 @@ func assertRecordSets(t *testing.T, got []targetRecordSet, want [][]string) {
 	}
 }
 
-func TestLoadStagingConfig(t *testing.T) {
-	tg, err := loadTarget(filepath.Join("..", "fly.staging.toml"))
+// TestRigZoneFile holds the rig's zone file to the record sets and the delegation the suite's cases rely on.
+func TestRigZoneFile(t *testing.T) {
+	zf, err := loadZoneFile(filepath.Join("rig", "zone"), "local-ip.test.")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if tg.app != "local-ip-staging" {
-		t.Errorf("app = %q, want %q", tg.app, "local-ip-staging")
-	}
-	if tg.domain != "xip-staging.local-ip.sh" {
-		t.Errorf("domain = %q, want %q", tg.domain, "xip-staging.local-ip.sh")
-	}
-	want := []netip.Addr{netip.MustParseAddr("149.248.203.129")}
-	if !slices.Equal(tg.nameServers, want) {
-		t.Errorf("nameServers = %v, want %v", tg.nameServers, want)
-	}
-	if !tg.stagingCA {
-		t.Error("stagingCA = false, want true")
-	}
-	if got, want := tg.soaRname(), "admin.local-ip.sh."; got != want {
-		t.Errorf("soaRname = %q, want %q", got, want)
-	}
-	assertRecordSets(t, tg.recordSets, [][]string{
-		{`e2e-records.xip-staging.local-ip.sh. 300 IN A 192.0.2.10`},
-		{`e2e-records.xip-staging.local-ip.sh. 300 IN AAAA 2001:db8::10`},
-		{`e2e-records.xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh e2e" "second string"`},
-		{`e2e-records.xip-staging.local-ip.sh. 300 IN MX 10 mail.example.net.`},
-		{`e2e-records.xip-staging.local-ip.sh. 300 IN CAA 0 issue ";"`},
-		{`e2e-alias.xip-staging.local-ip.sh. 600 IN CNAME target.example.net.`},
-		{`_e2e._tcp.xip-staging.local-ip.sh. 300 IN SRV 0 0 443 target.example.net.`},
-		{`xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh test instance"`},
-		stagingTXTRecords(udpTXTLabel, 4),
-		stagingTXTRecords(tcpTXTLabel, 12),
+	assertDelegations(t, zf.delegations, []targetDelegation{{
+		cut:         "e2e-delegated.local-ip.test.",
+		nameServers: []string{"ns1.e2e-delegated.local-ip.test."},
+		glue:        map[string][]netip.Addr{"ns1.e2e-delegated.local-ip.test.": {netip.MustParseAddr("192.0.2.53")}},
+	}})
+	assertRecordSets(t, zf.recordSets, [][]string{
+		{`e2e-records.local-ip.test. 300 IN A 192.0.2.10`},
+		{`e2e-records.local-ip.test. 300 IN AAAA 2001:db8::10`},
+		{`e2e-records.local-ip.test. 300 IN TXT "local-ip.sh e2e" "second string"`},
+		{`e2e-records.local-ip.test. 300 IN MX 10 mail.example.net.`},
+		{`e2e-records.local-ip.test. 300 IN CAA 0 issue ";"`},
+		{`e2e-alias.local-ip.test. 600 IN CNAME target.example.net.`},
+		{`_e2e._tcp.local-ip.test. 300 IN SRV 0 0 443 target.example.net.`},
+		{`local-ip.test. 300 IN TXT "local-ip.sh test instance"`},
+		rigTXTRecords(udpTXTLabel, 4),
+		rigTXTRecords(tcpTXTLabel, 12),
 	})
+	tg := &target{domain: "local-ip.test", recordSets: zf.recordSets}
 	for _, label := range []string{udpTXTLabel, tcpTXTLabel} {
 		set, ok := tg.txtSetAt(label)
 		if !ok {
@@ -583,12 +549,12 @@ func TestLoadStagingConfig(t *testing.T) {
 	}
 }
 
-// stagingTXTRecords spells the TXT set the staging zone file declares at the label: n records, each of one string of 180 octets that starts with its position.
-func stagingTXTRecords(label string, n int) []string {
+// rigTXTRecords spells the TXT set the rig's zone file declares at the label: n records, each of one string of 180 octets that starts with its position.
+func rigTXTRecords(label string, n int) []string {
 	records := make([]string, n)
 	for i := range n {
 		prefix := fmt.Sprintf("%s record %d of %d ", label, i+1, n)
-		records[i] = fmt.Sprintf(`%s.xip-staging.local-ip.sh. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
+		records[i] = fmt.Sprintf(`%s.local-ip.test. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
 	}
 	return records
 }
@@ -635,16 +601,15 @@ func TestLoadTargetNormalisesValues(t *testing.T) {
 		"XIP_DOMAIN":      `" Example.COM. "`,
 		"XIP_NAMESERVERS": `" 1.2.3.4 ,\t5.6.7.8 "`,
 		"XIP_EMAIL":       `" first.last@example.com "`,
-		"XIP_STAGING":     `" true "`,
 	}))
 
-	tg, err := loadTarget(configPath)
+	tg, err := loadFlyTarget(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if tg.app != "my-app" {
-		t.Errorf("app = %q, want %q", tg.app, "my-app")
+	if tg.name != "Fly app my-app" {
+		t.Errorf("name = %q, want %q", tg.name, "Fly app my-app")
 	}
 	if tg.domain != "example.com" {
 		t.Errorf("domain = %q, want %q", tg.domain, "example.com")
@@ -662,9 +627,6 @@ func TestLoadTargetNormalisesValues(t *testing.T) {
 	}
 	if tg.email != "first.last@example.com" {
 		t.Errorf("email = %q, want %q", tg.email, "first.last@example.com")
-	}
-	if !tg.stagingCA {
-		t.Error("stagingCA = false, want true")
 	}
 }
 
@@ -694,17 +656,16 @@ func TestLoadTargetRejectsInvalidConfig(t *testing.T) {
 		{name: "email invalid", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `"not-an-address"`}), key: "XIP_EMAIL"},
 		{name: "email with display name", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `"Admin <admin@example.com>"`}), key: "XIP_EMAIL"},
 		{name: "email in angle brackets", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `"<admin@example.com>"`}), key: "XIP_EMAIL"},
-		{name: "staging not a boolean", app: `"a"`, env: validEnv(map[string]string{"XIP_STAGING": `"maybe"`}), key: "XIP_STAGING"},
-		{name: "staging not a string", app: `"a"`, env: validEnv(map[string]string{"XIP_STAGING": `true`}), key: "XIP_STAGING"},
+		{name: "zone file not a string", app: `"a"`, env: validEnv(map[string]string{"XIP_ZONE_FILE": `true`}), key: "XIP_ZONE_FILE"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			configPath := writeConfig(t, flyConfig(tt.app, tt.env))
 
-			_, err := loadTarget(configPath)
+			_, err := loadFlyTarget(configPath)
 			if err == nil {
-				t.Fatal("loadTarget succeeded, want an error")
+				t.Fatal("loadFlyTarget succeeded, want an error")
 			}
 			if !strings.Contains(err.Error(), tt.key) {
 				t.Errorf("error %q does not name the key %q", err, tt.key)
@@ -748,7 +709,7 @@ func TestLoadTargetSOARname(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tg, err := loadTarget(writeConfig(t, flyConfig(`"a"`, validEnv(map[string]string{"XIP_EMAIL": strconv.Quote(tt.email)}))))
+			tg, err := loadFlyTarget(writeConfig(t, flyConfig(`"a"`, validEnv(map[string]string{"XIP_EMAIL": strconv.Quote(tt.email)}))))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -772,116 +733,13 @@ func TestLoadTargetRejectsEmailThatCannotBeAnRname(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			configPath := writeConfig(t, flyConfig(`"a"`, validEnv(map[string]string{"XIP_EMAIL": strconv.Quote(tt.email)})))
-			_, err := loadTarget(configPath)
+			_, err := loadFlyTarget(configPath)
 			if err == nil {
-				t.Fatal("loadTarget succeeded, want an error")
+				t.Fatal("loadFlyTarget succeeded, want an error")
 			}
 			for _, want := range []string{configPath, "XIP_EMAIL", "RNAME"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not contain %q", err, want)
-				}
-			}
-		})
-	}
-}
-
-func TestStagingRootPool(t *testing.T) {
-	wantFingerprints := map[string]string{
-		"(STAGING) Pretend Pear X1":        "E7:05:70:A9:89:F8:56:5A:AB:DF:7C:AE:27:AB:D1:62:18:72:D6:A3:F8:11:E3:FE:F2:7E:3D:BA:02:91:21:98",
-		"(STAGING) Bogus Broccoli X2":      "9B:2A:33:9F:E6:A3:E8:55:85:C4:CD:75:53:6C:B8:C1:CF:7C:D6:03:B9:A6:4B:EC:25:21:85:8A:E4:8D:A8:5D",
-		"(STAGING) Yearning Yucca Root YE": "B5:9B:FC:0B:A5:2D:AF:84:98:53:B7:32:4A:91:E8:2F:03:1D:B3:39:7F:35:64:41:57:35:2C:DE:63:84:B5:6C",
-		"(STAGING) Yonder Yam Root YR":     "EF:11:5F:B5:9E:04:0F:F3:9D:15:FD:8F:3E:F5:40:63:C7:04:32:1D:83:CB:08:12:13:27:2F:77:D3:09:16:72",
-	}
-
-	roots, err := stagingRoots()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(roots) != len(wantFingerprints) {
-		t.Fatalf("got %d vendored roots, want %d", len(roots), len(wantFingerprints))
-	}
-
-	seen := make(map[string]bool, len(wantFingerprints))
-	expected := x509.NewCertPool()
-	for _, root := range roots {
-		cn := root.Subject.CommonName
-		want, ok := wantFingerprints[cn]
-		if !ok {
-			t.Errorf("unexpected vendored root %q", cn)
-			continue
-		}
-		sum := sha256.Sum256(root.Raw)
-		if got := colonHex(sum[:]); got != want {
-			t.Errorf("root %q has fingerprint %s, want %s", cn, got, want)
-			continue
-		}
-		if seen[cn] {
-			t.Errorf("root %q is vendored more than once", cn)
-		}
-		seen[cn] = true
-		if err := root.CheckSignatureFrom(root); err != nil {
-			t.Errorf("root %q is not self-signed: %v", cn, err)
-		}
-		expected.AddCert(root)
-	}
-
-	for cn := range wantFingerprints {
-		if !seen[cn] {
-			t.Errorf("root %q is not vendored", cn)
-		}
-	}
-
-	pool, err := stagingRootPool()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !pool.Equal(expected) {
-		t.Error("staging trust pool does not contain exactly the vendored roots")
-	}
-	if pool.Equal(x509.NewCertPool()) {
-		t.Error("staging trust pool is empty")
-	}
-}
-
-func colonHex(b []byte) string {
-	encoded := strings.ToUpper(hex.EncodeToString(b))
-	pairs := make([]string, 0, len(encoded)/2)
-	for i := 0; i < len(encoded); i += 2 {
-		pairs = append(pairs, encoded[i:i+2])
-	}
-	return strings.Join(pairs, ":")
-}
-
-func TestLoadTargetDelegations(t *testing.T) {
-	tests := []struct {
-		configPath string
-		want       []targetDelegation
-	}{
-		{
-			configPath: filepath.Join("..", "fly.staging.toml"),
-			want: []targetDelegation{{
-				cut:         "e2e-delegated.xip-staging.local-ip.sh.",
-				nameServers: []string{"ns1.e2e-delegated.xip-staging.local-ip.sh."},
-				glue:        map[string][]netip.Addr{"ns1.e2e-delegated.xip-staging.local-ip.sh.": {netip.MustParseAddr("192.0.2.53")}},
-			}},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.configPath, func(t *testing.T) {
-			tg, err := loadTarget(tt.configPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertDelegations(t, tg.delegations, tt.want)
-			if len(tg.recordSets) == 0 {
-				t.Error("no record sets loaded, want the records the zone file declares besides its delegations")
-			}
-			for _, set := range tg.recordSets {
-				for _, d := range tg.delegations {
-					if dns.IsSubDomain(d.cut, set.owner) {
-						t.Errorf("record set %s %s is at or below the cut %s, want only glue there", set.owner, dns.Type(set.rrtype), d.cut)
-					}
 				}
 			}
 		})
@@ -1044,27 +902,32 @@ func TestLoadTargetZoneFile(t *testing.T) {
 		{
 			name:    "no [[files]] entry",
 			zoneEnv: zoneFile,
-			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "guest_path", "local_path"},
+			wantErr: []string{"env.XIP_ZONE_FILE", `"/etc/local-ip.zone" is not the path of a file the deployment delivers`},
 		},
 		{
 			name:    "no [[files]] entry with the guest path",
 			zoneEnv: zoneFile,
 			files:   "[[files]]\nguest_path = \"/etc/other.zone\"\nlocal_path = \"zones/test.zone\"\n",
 			zone:    validZone,
-			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "guest_path", "local_path"},
+			wantErr: []string{"env.XIP_ZONE_FILE", `"/etc/local-ip.zone" is not the path of a file the deployment delivers`},
 		},
 		{
 			name:    "two [[files]] entries with the guest path",
 			zoneEnv: zoneFile,
 			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n",
 			zone:    validZone,
-			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "found 2"},
+			wantErr: []string{"files[1].guest_path", "of an earlier entry too"},
 		},
 		{
 			name:    "empty local path",
 			zoneEnv: zoneFile,
 			files:   "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"  \"\n",
-			wantErr: []string{"env.XIP_ZONE_FILE", "[[files]]", "local_path"},
+			wantErr: []string{"files[0].local_path", "must not be empty"},
+		},
+		{
+			name:    "a guest path that is not a string",
+			files:   "[[files]]\nguest_path = 1\nlocal_path = \"zones/test.zone\"\n",
+			wantErr: []string{"files[0].guest_path", "must be a string"},
 		},
 		{
 			name:    "missing zone file",
@@ -1124,10 +987,10 @@ func TestLoadTargetZoneFile(t *testing.T) {
 				writeZoneFile(t, zonesDir, "test.zone", tt.zone)
 			}
 
-			tg, err := loadTarget(configPath)
+			tg, err := loadFlyTarget(configPath)
 			if tt.wantErr != nil {
 				if err == nil {
-					t.Fatal("loadTarget succeeded, want an error")
+					t.Fatal("loadFlyTarget succeeded, want an error")
 				}
 				for _, want := range append([]string{configPath}, tt.wantErr...) {
 					if !strings.Contains(err.Error(), want) {
@@ -1222,7 +1085,7 @@ func TestLoadedRecordSetIsCheckedAgainstAnswersOnTheWire(t *testing.T) {
 			}
 			writeZoneFile(t, zonesDir, "test.zone", tt.zone+"\n")
 
-			tg, err := loadTarget(configPath)
+			tg, err := loadFlyTarget(configPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1273,9 +1136,9 @@ func TestLoadTargetRejectsZoneFileThatClaimsAProbeName(t *testing.T) {
 			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"test.zone\"\n")
 			writeZoneFile(t, filepath.Dir(configPath), "test.zone", tt.zone)
 
-			_, err := loadTarget(configPath)
+			_, err := loadFlyTarget(configPath)
 			if err == nil {
-				t.Fatal("loadTarget succeeded, want an error")
+				t.Fatal("loadFlyTarget succeeded, want an error")
 			}
 			for _, want := range append([]string{configPath}, tt.wantErr...) {
 				if !strings.Contains(err.Error(), want) {
@@ -1312,15 +1175,15 @@ func TestLoadTargetChecksTransportSets(t *testing.T) {
 			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"test.zone\"\n")
 			writeZoneFile(t, filepath.Dir(configPath), "test.zone", tt.zone)
 
-			_, err := loadTarget(configPath)
+			_, err := loadFlyTarget(configPath)
 			if tt.wantErr == nil {
 				if err != nil {
-					t.Fatalf("loadTarget refused the zone file: %v", err)
+					t.Fatalf("loadFlyTarget refused the zone file: %v", err)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatal("loadTarget succeeded, want an error")
+				t.Fatal("loadFlyTarget succeeded, want an error")
 			}
 			for _, want := range append([]string{configPath}, tt.wantErr...) {
 				if !strings.Contains(err.Error(), want) {

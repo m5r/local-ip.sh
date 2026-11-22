@@ -1,4 +1,5 @@
-FLY_CONFIG ?= fly.staging.toml
+FLY_CONFIG ?= fly.toml
+RIG_COMPOSE_FILE = e2e/rig/compose.yml
 
 # The project is what git sees: tracked files plus untracked files that are not ignored.
 # Listing them explicitly keeps ignored scratch directories in a checkout from breaking the build.
@@ -6,7 +7,7 @@ GIT_GO_FILES = git ls-files --cached --others --exclude-standard -- '*.go'
 GO_FILES := $(wildcard $(shell $(GIT_GO_FILES) 2>/dev/null))
 GO_PACKAGES := $(sort $(dir $(addprefix ./,$(GO_FILES))))
 
-.PHONY: check e2e e2e-lifecycle
+.PHONY: check e2e e2e-local
 
 # Make and the shell split the file list on whitespace and expand special characters, so a path
 # outside the plain alphabet below would be skipped silently instead of being checked.
@@ -39,12 +40,10 @@ e2e:
 		|| { echo "Cannot resolve the path of $(FLY_CONFIG)" >&2; exit 1; }; \
 	E2E_FLY_CONFIG="$$config" go test ./e2e -run '^TestLive$$' -count=1 -v -timeout 1h
 
-# The test refuses every deployment but local-ip-staging (it checks the Fly config, then the machine's own configuration, then the certificates against the staging roots), so this target needs no guard of its own.
+# The test starts the rig, runs against it and removes it with its volumes, whatever the outcome. It refuses a compose project other than the rig's, so this target needs no guard of its own.
 #
-# The token is read by the shell and never by make: $(FLY_API_TOKEN) would copy it into the command line that make prints.
-e2e-lifecycle:
-	@test -f "$(FLY_CONFIG)" || { echo "Fly config not found: $(FLY_CONFIG)" >&2; exit 1; }
-	@test -n "$$FLY_API_TOKEN" || { echo 'FLY_API_TOKEN is not set: see "Testing" in README.md' >&2; exit 1; }
-	@config="$$(realpath -- "$(FLY_CONFIG)")" && test -n "$$config" \
-		|| { echo "Cannot resolve the path of $(FLY_CONFIG)" >&2; exit 1; }; \
-	E2E_LIFECYCLE_FLY_CONFIG="$$config" go test ./e2e -run '^TestStagingLifecycle$$' -count=1 -v -timeout 30m
+# A run builds the image, waits for two orders of 75 seconds each at the first start and two more for the renewal, so it outlasts go test's default timeout of ten minutes.
+e2e-local:
+	@config="$$(realpath -- "$(RIG_COMPOSE_FILE)")" && test -n "$$config" \
+		|| { echo "Cannot resolve the path of $(RIG_COMPOSE_FILE)" >&2; exit 1; }; \
+	E2E_COMPOSE_FILE="$$config" go test ./e2e -run '^TestRig$$' -count=1 -v -timeout 40m

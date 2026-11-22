@@ -12,7 +12,7 @@ import (
 )
 
 // optionVariables are cleared for every test, so that what the shell running the tests exports cannot change their outcome.
-var optionVariables = []string{"XIP_STAGING", "XIP_DNS_PORT", "XIP_HTTP_PORT", "XIP_HTTPS_PORT", "FLY_APP_NAME", "FLY_REGION"}
+var optionVariables = []string{"XIP_ACME_DIRECTORY", "XIP_DOMAIN", "XIP_EMAIL", "XIP_NAMESERVERS", "XIP_STATE_DIR", "XIP_ZONE_FILE", "XIP_DNS_PORT", "XIP_HTTP_PORT", "XIP_HTTPS_PORT", "FLY_APP_NAME", "FLY_REGION"}
 
 // setUp gives the test a fresh viper with the flags bound and the environment loaded, as Run does, and the command whose flags the test may set.
 func setUp(t *testing.T, environment map[string]string) *cobra.Command {
@@ -43,44 +43,49 @@ func mustConfig(t *testing.T) app.Config {
 	return cfg
 }
 
-func TestConfigStaging(t *testing.T) {
-	for _, test := range []struct {
-		value string
-		want  string
-	}{
-		{value: "", want: certs.LetsEncryptProduction},
-		{value: "false", want: certs.LetsEncryptProduction},
-		{value: "true", want: certs.LetsEncryptStaging},
-		{value: "1", want: certs.LetsEncryptStaging},
-	} {
-		t.Run("XIP_STAGING="+test.value, func(t *testing.T) {
-			setUp(t, map[string]string{"XIP_STAGING": test.value})
-			if got := mustConfig(t).DirectoryURL; got != test.want {
-				t.Errorf("DirectoryURL is %q, want %q", got, test.want)
-			}
-		})
-	}
+func TestConfigACMEDirectory(t *testing.T) {
+	const other = "https://ca.example:14000/dir"
 
-	for _, value := range []string{"tru", "yes"} {
-		t.Run("XIP_STAGING="+value, func(t *testing.T) {
-			setUp(t, map[string]string{"XIP_STAGING": value})
-			cfg, err := config()
-			if err == nil {
-				t.Fatalf("config accepted XIP_STAGING=%s and chose %s", value, cfg.DirectoryURL)
-			}
-			if !strings.Contains(err.Error(), "XIP_STAGING") || !strings.Contains(err.Error(), "--staging") || !strings.Contains(err.Error(), `"`+value+`"`) {
-				t.Errorf("the error %q does not name --staging / XIP_STAGING and quote the value", err)
-			}
-		})
-	}
+	t.Run("default", func(t *testing.T) {
+		setUp(t, nil)
+		if got := mustConfig(t).DirectoryURL; got != certs.LetsEncryptProduction {
+			t.Errorf("DirectoryURL is %q, want %q", got, certs.LetsEncryptProduction)
+		}
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		setUp(t, map[string]string{"XIP_ACME_DIRECTORY": other})
+		if got := mustConfig(t).DirectoryURL; got != other {
+			t.Errorf("DirectoryURL is %q, want %q", got, other)
+		}
+	})
 
 	t.Run("flag", func(t *testing.T) {
 		command := setUp(t, nil)
-		if err := command.Flags().Set("staging", "true"); err != nil {
+		if err := command.Flags().Set("acme-directory", other); err != nil {
 			t.Fatal(err)
 		}
-		if got := mustConfig(t).DirectoryURL; got != certs.LetsEncryptStaging {
-			t.Errorf("DirectoryURL is %q, want %q", got, certs.LetsEncryptStaging)
+		if got := mustConfig(t).DirectoryURL; got != other {
+			t.Errorf("DirectoryURL is %q, want %q", got, other)
+		}
+	})
+
+	// The option is passed on unparsed, so the refusal of a URL that is not HTTPS is the certificate manager's, which app.New reports before it binds any socket.
+	t.Run("not https", func(t *testing.T) {
+		setUp(t, map[string]string{
+			"XIP_ACME_DIRECTORY": "http://ca.example/dir",
+			"XIP_DOMAIN":         "example.com",
+			"XIP_EMAIL":          "admin@example.com",
+			"XIP_NAMESERVERS":    "192.0.2.1",
+			"XIP_STATE_DIR":      t.TempDir(),
+			"XIP_DNS_PORT":       "0",
+			"XIP_HTTP_PORT":      "0",
+			"XIP_HTTPS_PORT":     "0",
+		})
+		if _, err := app.New(mustConfig(t)); err == nil {
+			t.Fatal("app.New accepted an http directory URL")
+		} else if !strings.Contains(err.Error(), `directory URL "http://ca.example/dir" is not an absolute https URL`) {
+			t.Errorf("the error %q is not the refusal of a directory URL that is not https", err)
 		}
 	})
 }

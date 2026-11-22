@@ -1456,12 +1456,12 @@ func TestIsProjectCut(t *testing.T) {
 // hostedRSADKIMValue is the RSA DKIM key that mail.mial.net signs the domain's mail with.
 const hostedRSADKIMValue = "v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2y9b1q/Of6doBMq4f16YJkM9BSMAdiNCyQhy1BcEVG9XpIObaJzhRWddhAPB6Awz/QqnCkx51AXuMDgKIsv2Cs87+jJoILdJ2T6HhS05kZj5FHBKMNctgcFzN2XRhXXpIVLWbA9Ef7takTa2AO5+qCT0M1xkumNQEXc/znTuaWS86e766hLA06a7pBwriJj4ceb5V6/q5fvfVq+EgJnk8WQ9DQRs4VjHaSVN0fscRzzJsZAQpa6KqmSLiXzM+NktGN40EZGqFrvvGcfdE+jEa++rePixXgKsETZCR32tKCNCELzbdTGchu01F6vZVxT/AGNfxzFWs9tuXdiltYmhbwIDAQAB"
 
-// stagingTXTRecords spells a TXT set the staging zone file declares for the e2e suite's truncation cases: n records, each of one string of 180 octets that starts with its position.
-func stagingTXTRecords(label string, n int) []string {
+// rigTXTRecords spells a TXT set the e2e rig's zone file declares for the suite's truncation cases: n records, each of one string of 180 octets that starts with its position.
+func rigTXTRecords(label string, n int) []string {
 	records := make([]string, n)
 	for i := range n {
 		prefix := fmt.Sprintf("%s record %d of %d ", label, i+1, n)
-		records[i] = fmt.Sprintf(`%s.xip-staging.local-ip.sh. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
+		records[i] = fmt.Sprintf(`%s.local-ip.test. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
 	}
 	return records
 }
@@ -1479,11 +1479,10 @@ func recordSetCount(records []dns.RR) int {
 	return len(sets)
 }
 
-// TestRepositoryZoneFiles loads the zone files delivered to the deployments the way their servers
-// do, so a file that would stop a server at startup fails here first.
+// TestRepositoryZoneFiles loads the zone files of the repository the way the servers they are delivered to do, so a file that would stop a server at startup fails here first.
 func TestRepositoryZoneFiles(t *testing.T) {
 	tests := []struct {
-		file          string
+		path          string
 		origin        string
 		nameServers   []string
 		challengeName string
@@ -1491,12 +1490,11 @@ func TestRepositoryZoneFiles(t *testing.T) {
 		cuts          []string
 		records       []string
 		recordSets    int
-		// The hosted instance has users whose names a delegation would take away; the staging
-		// instance has none.
+		// The hosted instance has users whose names a delegation would take away; the e2e rig has none.
 		hosted bool
 	}{
 		{
-			file:          "local-ip.sh.zone",
+			path:          filepath.Join("..", "zones", "local-ip.sh.zone"),
 			origin:        "local-ip.sh",
 			nameServers:   []string{"ns1.local-ip.sh.", "ns2.local-ip.sh."},
 			challengeName: "_acme-challenge.local-ip.sh.",
@@ -1514,29 +1512,29 @@ func TestRepositoryZoneFiles(t *testing.T) {
 			hosted:     true,
 		},
 		{
-			file:          "xip-staging.local-ip.sh.zone",
-			origin:        "xip-staging.local-ip.sh",
-			nameServers:   []string{"ns1.xip-staging.local-ip.sh."},
-			challengeName: "_acme-challenge.xip-staging.local-ip.sh.",
-			addresses:     []netip.Addr{netip.MustParseAddr("149.248.203.129")},
-			cuts:          []string{"e2e-delegated.xip-staging.local-ip.sh."},
+			path:          filepath.Join("..", "e2e", "rig", "zone"),
+			origin:        "local-ip.test",
+			nameServers:   []string{"ns1.local-ip.test."},
+			challengeName: "_acme-challenge.local-ip.test.",
+			addresses:     []netip.Addr{netip.MustParseAddr("10.253.53.53")},
+			cuts:          []string{"e2e-delegated.local-ip.test."},
 			records: append([]string{
-				"e2e-records.xip-staging.local-ip.sh. 300 IN A 192.0.2.10",
-				"e2e-records.xip-staging.local-ip.sh. 300 IN AAAA 2001:db8::10",
-				`e2e-records.xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh e2e" "second string"`,
-				"e2e-records.xip-staging.local-ip.sh. 300 IN MX 10 mail.example.net.",
-				`e2e-records.xip-staging.local-ip.sh. 300 IN CAA 0 issue ";"`,
-				"e2e-alias.xip-staging.local-ip.sh. 600 IN CNAME target.example.net.",
-				"_e2e._tcp.xip-staging.local-ip.sh. 300 IN SRV 0 0 443 target.example.net.",
-				`xip-staging.local-ip.sh. 300 IN TXT "local-ip.sh test instance"`,
-			}, append(stagingTXTRecords("e2e-txt-udp", 4), stagingTXTRecords("e2e-txt-tcp", 12)...)...),
+				"e2e-records.local-ip.test. 300 IN A 192.0.2.10",
+				"e2e-records.local-ip.test. 300 IN AAAA 2001:db8::10",
+				`e2e-records.local-ip.test. 300 IN TXT "local-ip.sh e2e" "second string"`,
+				"e2e-records.local-ip.test. 300 IN MX 10 mail.example.net.",
+				`e2e-records.local-ip.test. 300 IN CAA 0 issue ";"`,
+				"e2e-alias.local-ip.test. 600 IN CNAME target.example.net.",
+				"_e2e._tcp.local-ip.test. 300 IN SRV 0 0 443 target.example.net.",
+				`local-ip.test. 300 IN TXT "local-ip.sh test instance"`,
+			}, append(rigTXTRecords("e2e-txt-udp", 4), rigTXTRecords("e2e-txt-tcp", 12)...)...),
 			recordSets: 10,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.file, func(t *testing.T) {
-			path := filepath.Join("..", "zones", tt.file)
+		t.Run(tt.path, func(t *testing.T) {
+			path := tt.path
 			content, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -1561,7 +1559,7 @@ func TestRepositoryZoneFiles(t *testing.T) {
 			}
 			for _, cut := range cuts {
 				if !isProjectCut(cut, tt.origin) {
-					t.Errorf("%s delegates %s: only labels starting with %q may be delegated on the hosted instance, because a delegation takes users' names below the label away from the service", tt.file, cut, projectLabelPrefix)
+					t.Errorf("%s delegates %s: only labels starting with %q may be delegated on the hosted instance, because a delegation takes users' names below the label away from the service", tt.path, cut, projectLabelPrefix)
 				}
 			}
 		})

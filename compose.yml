@@ -9,7 +9,7 @@ services:
             XIP_DOMAIN: "local-ip.sh"
             XIP_EMAIL: "admin@local-ip.sh"
             XIP_NAMESERVERS: "137.66.40.11,137.66.40.12"
-            # XIP_STAGING: true
+            # XIP_ACME_DIRECTORY: "https://acme-staging-v02.api.letsencrypt.org/directory"
         ports:
             - 53:53/udp
             - 53:53/tcp

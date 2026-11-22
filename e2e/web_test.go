@@ -29,6 +29,13 @@ const (
 // and the verified name, so each nameserver's instance is checked on its own.
 func pinnedClient(t *testing.T, tg *target, ip netip.Addr) *http.Client {
 	t.Helper()
+	client := newPinnedClient(ip, tg.roots)
+	t.Cleanup(client.CloseIdleConnections)
+	return client
+}
+
+// newPinnedClient is pinnedClient for a caller that closes its idle connections itself.
+func newPinnedClient(ip netip.Addr, roots *x509.CertPool) *http.Client {
 	dialer := &net.Dialer{}
 	transport := &http.Transport{
 		Proxy: nil,
@@ -39,9 +46,8 @@ func pinnedClient(t *testing.T, tg *target, ip netip.Addr) *http.Client {
 			}
 			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		},
-		TLSClientConfig: &tls.Config{RootCAs: tg.roots},
+		TLSClientConfig: &tls.Config{RootCAs: roots},
 	}
-	t.Cleanup(transport.CloseIdleConnections)
 	return &http.Client{
 		Transport: transport,
 		Timeout:   httpTimeout,
