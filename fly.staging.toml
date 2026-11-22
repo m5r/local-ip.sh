@@ -3,9 +3,6 @@ primary_region = "ams"
 kill_signal = "SIGINT"
 kill_timeout = "5s"
 
-[experimental]
-auto_rollback = true
-
 [build]
 
 [env]
@@ -47,7 +44,7 @@ min_machines_running = 0
 [[services.ports]]
 port = 53
 
-# Each TCP service has a check, so that a deploy waits for the listeners and `fly status` shows their state. A check shows that a TCP connection to the port completes, not that DNS, HTTP or TLS answer on it, and says nothing about UDP. A failing check restarts nothing: it takes the machine out of routing for that service until the check passes again.
+# Each TCP service has a check, so that a deploy waits for the listeners and `fly status` shows their state. A check shows that a TCP connection to the port completes, not that DNS, HTTP or TLS answer on it, and says nothing about UDP. A failing check restarts nothing: it takes the machine out of routing for that service until the check passes again. A deploy that fails on a check is not rolled back either: the machine stays on the new release, and going back is a deploy of the previous image.
 [[services.tcp_checks]]
 grace_period = "10s"
 interval = "15s"
