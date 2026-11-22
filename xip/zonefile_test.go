@@ -1453,8 +1453,8 @@ func TestIsProjectCut(t *testing.T) {
 	}
 }
 
-// hostedDKIMValue is the DKIM key the hosted instance served from compiled-in records before they moved to its zone file.
-const hostedDKIMValue = "v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMW6NFo34qzKRPbzK41GwbWncB8IDg1i2eA2VWznIVDmTzzsqILaBOGv2xokVpzZm0QRF9wSbeVUmvwEeQ7Z6wkfMjawenDEc3XxsNSvQUVBP6LU/xcm1zsR8wtD8r5J+Jm45pNFaateiM/kb/Eypp2ntdtd8CPsEgCEDpNb62LWdy0yzRdZ/M/fNn51UMN8hVFp4YfZngAt3bQwa6kPtgvTeqEbpNf5xanpDysNJt2S8zfqJMVGvnr8JaJiTv7ZlKMMp94aC5Ndcir1WbMyfmgSnGgemuCTVMWDGPJnXDi+8BQMH1b1hmTpWDiVdVlehyyWx5AfPrsWG9cEuDIfXwIDAQAB"
+// hostedRSADKIMValue is the RSA DKIM key that mail.mial.net signs the domain's mail with.
+const hostedRSADKIMValue = "v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2y9b1q/Of6doBMq4f16YJkM9BSMAdiNCyQhy1BcEVG9XpIObaJzhRWddhAPB6Awz/QqnCkx51AXuMDgKIsv2Cs87+jJoILdJ2T6HhS05kZj5FHBKMNctgcFzN2XRhXXpIVLWbA9Ef7takTa2AO5+qCT0M1xkumNQEXc/znTuaWS86e766hLA06a7pBwriJj4ceb5V6/q5fvfVq+EgJnk8WQ9DQRs4VjHaSVN0fscRzzJsZAQpa6KqmSLiXzM+NktGN40EZGqFrvvGcfdE+jEa++rePixXgKsETZCR32tKCNCELzbdTGchu01F6vZVxT/AGNfxzFWs9tuXdiltYmhbwIDAQAB"
 
 // stagingTXTRecords spells a TXT set the staging zone file declares for the e2e suite's truncation cases: n records, each of one string of 180 octets that starts with its position.
 func stagingTXTRecords(label string, n int) []string {
@@ -1503,15 +1503,14 @@ func TestRepositoryZoneFiles(t *testing.T) {
 			addresses:     []netip.Addr{netip.MustParseAddr("137.66.40.11"), netip.MustParseAddr("137.66.40.12")},
 			cuts:          []string{"xip-staging.local-ip.sh."},
 			records: []string{
-				`local-ip.sh. 300 IN TXT "v=spf1 include:capsulecorp.dev ~all"`,
-				"local-ip.sh. 300 IN MX 10 email.capsulecorp.dev.",
-				"autodiscover.local-ip.sh. 300 IN CNAME email.capsulecorp.dev.",
-				"autoconfig.local-ip.sh. 300 IN CNAME email.capsulecorp.dev.",
-				"_autodiscover._tcp.local-ip.sh. 300 IN SRV 0 0 443 email.capsulecorp.dev.",
-				`_dmarc.local-ip.sh. 300 IN TXT "v=DMARC1; p=none; rua=mailto:postmaster@local-ip.sh; ruf=mailto:admin@local-ip.sh"`,
-				fmt.Sprintf(`dkim._domainkey.local-ip.sh. 300 IN TXT "%s" "%s"`, hostedDKIMValue[:255], hostedDKIMValue[255:]),
+				"local-ip.sh. 300 IN MX 10 mail.mial.net.",
+				`local-ip.sh. 300 IN TXT "v=spf1 mx -all"`,
+				`202411e._domainkey.local-ip.sh. 300 IN TXT "v=DKIM1; k=ed25519; h=sha256; p=Xic3wKt0G+05OJw4q9U5FImcGnvKcMK5chBgYljJv8c="`,
+				fmt.Sprintf(`202411r._domainkey.local-ip.sh. 300 IN TXT "%s" "%s"`, hostedRSADKIMValue[:255], hostedRSADKIMValue[255:]),
+				`_dmarc.local-ip.sh. 300 IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@local-ip.sh"`,
+				`_smtp._tls.local-ip.sh. 300 IN TXT "v=TLSRPTv1; rua=mailto:postmaster@local-ip.sh"`,
 			},
-			recordSets: 7,
+			recordSets: 6,
 			hosted:     true,
 		},
 		{
@@ -1570,7 +1569,7 @@ func TestRepositoryZoneFiles(t *testing.T) {
 }
 
 func TestRepositoryZoneFilesHostedDKIMRecord(t *testing.T) {
-	const owner = "dkim._domainkey.local-ip.sh."
+	const owner = "202411r._domainkey.local-ip.sh."
 	path := filepath.Join("..", "zones", "local-ip.sh.zone")
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -1592,13 +1591,13 @@ func TestRepositoryZoneFilesHostedDKIMRecord(t *testing.T) {
 		t.Fatalf("got %d TXT records at %s, want 1", len(dkim), owner)
 	}
 
-	t.Run("its strings joined are the DKIM key served before", func(t *testing.T) {
-		if got := strings.Join(dkim[0].Txt, ""); got != hostedDKIMValue {
-			t.Errorf("DKIM value = %q, want %q", got, hostedDKIMValue)
+	t.Run("its strings joined are the mail server's key", func(t *testing.T) {
+		if got := strings.Join(dkim[0].Txt, ""); got != hostedRSADKIMValue {
+			t.Errorf("DKIM value = %q, want %q", got, hostedRSADKIMValue)
 		}
 	})
-	t.Run("its strings are cut as the compiled-in record was", func(t *testing.T) {
-		if got, want := dkim[0].Txt, chunkBy(hostedDKIMValue, 255); !slices.Equal(got, want) {
+	t.Run("its strings are cut every 255 octets", func(t *testing.T) {
+		if got, want := dkim[0].Txt, chunkBy(hostedRSADKIMValue, 255); !slices.Equal(got, want) {
 			t.Errorf("strings = %q, want %q", got, want)
 		}
 	})
