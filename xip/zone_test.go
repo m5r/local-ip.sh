@@ -12,7 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// exampleZoneFile is the zone file of the examples of B8.
+// exampleZoneFile is the zone file of the example zone the answer tables use.
 // The record with its own TTL comes last because, without a $TTL directive, a TTL written on a record becomes the default of every record after it (RFC 1035 section 5.1).
 const exampleZoneFile = `@               TXT    "v=spf1 -all"
 @               MX     10 mail.other.test.
@@ -58,7 +58,7 @@ func exampleAddresses() []netip.Addr {
 	return addresses
 }
 
-// newExampleZone builds the zone of B8 for domain example.test from a zone file, without NewXip and without a socket.
+// newExampleZone builds the example zone for domain example.test from a zone file, without NewXip and without a socket.
 func newExampleZone(t *testing.T, zoneFileContent string) *zone {
 	t.Helper()
 	file, err := parseZoneFile(strings.NewReader(zoneFileContent), testZoneFileName, zoneServer{
@@ -186,7 +186,7 @@ type answerExchange struct {
 	challenge []string
 }
 
-// answerRow is one line of the tables of B8.
+// answerRow is one line of the answer tables.
 type answerRow struct {
 	name      string
 	exchanges []answerExchange
@@ -240,7 +240,7 @@ var (
 	aliasFor = positive("{q} 300 IN CNAME target.other.test.")
 )
 
-// exampleZoneRows are the lines of B8.1, the questions the zone answers.
+// exampleZoneRows are the lines of the table of questions the zone answers.
 func exampleZoneRows(t *testing.T) []answerRow {
 	t.Helper()
 	name253 := nameOfWireLength(t, 253, exampleApex)

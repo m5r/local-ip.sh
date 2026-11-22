@@ -15,7 +15,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// expectNoData checks the NODATA form of B4: NOERROR, AA, no answer, the zone's SOA record owned by the apex alone in the authority section with the TTL given, nothing in the additional section.
+// expectNoData checks the NODATA form of a negative answer: NOERROR, AA, no answer, the zone's SOA record owned by the apex alone in the authority section with the TTL given, nothing in the additional section.
 func expectNoData(t *testing.T, resp *dns.Msg, apex string, ttl uint32) {
 	t.Helper()
 	if resp.Rcode != dns.RcodeSuccess || !resp.Authoritative || len(resp.Answer) != 0 || len(resp.Extra) != 0 || len(resp.Ns) != 1 {
@@ -27,7 +27,7 @@ func expectNoData(t *testing.T, resp *dns.Msg, apex string, ttl uint32) {
 	}
 }
 
-// startExampleServer serves the configuration of B8 with the given zone file on a loopback socket.
+// startExampleServer serves the example configuration with the given zone file on a loopback socket.
 func startExampleServer(t *testing.T, zoneFileContent string) (*Xip, string) {
 	t.Helper()
 	xip, err := NewXip(
@@ -215,7 +215,7 @@ func TestAnswers(t *testing.T) {
 	xip, address := startExampleServer(t, exampleZoneFile)
 	_, longAddress := startExampleServer(t, longZoneFile(t))
 
-	t.Run("B8.1", func(t *testing.T) {
+	t.Run("questions the zone answers", func(t *testing.T) {
 		for _, row := range exampleZoneRows(t) {
 			t.Run(row.name, func(t *testing.T) {
 				server := address
@@ -237,7 +237,7 @@ func TestAnswers(t *testing.T) {
 	refused := answerWant{rcode: dns.RcodeRefused}
 	formErr := answerWant{rcode: dns.RcodeFormatError}
 	notImp := answerWant{rcode: dns.RcodeNotImplemented}
-	t.Run("B8.2", func(t *testing.T) {
+	t.Run("requests refused, not implemented or malformed", func(t *testing.T) {
 		rows := []struct {
 			name     string
 			requests []*dns.Msg
@@ -314,7 +314,7 @@ func TestAnswers(t *testing.T) {
 		}
 	})
 
-	t.Run("B8.3", func(t *testing.T) {
+	t.Run("header flags that do not change the answer", func(t *testing.T) {
 		rows := []struct {
 			name    string
 			request *dns.Msg

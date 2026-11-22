@@ -39,7 +39,7 @@ type zone struct {
 	cuts    *zoneCuts
 }
 
-// newZone builds the zone of B1 from the configuration and from what the zone file declares (nil without a zone file), and checks B7.
+// newZone builds the zone from the configuration and from what the zone file declares (nil without a zone file), and checks that its built-in answers fit in a DNS message.
 func newZone(domain, email string, nameServers []netip.Addr, file *zoneFile) (*zone, error) {
 	apex, err := canonicalName(domain)
 	if err != nil {
@@ -110,7 +110,7 @@ func (z *zone) add(rr dns.RR) {
 	sets[rr.Header().Rrtype] = append(sets[rr.Header().Rrtype], rr)
 }
 
-// checkResponseSizes refuses a configuration whose built-in answers at the apex, which grow with the list of name servers, would not fit in a DNS message (B7); every other reply is bounded by construction or by the zone file's own checks.
+// checkResponseSizes refuses a configuration whose built-in answers at the apex, which grow with the list of name servers, would not fit in a DNS message; every other reply is bounded by construction or by the zone file's own checks.
 func (z *zone) checkResponseSizes() error {
 	qname := upperASCII(z.apex)
 	nsSize, err := responseSize(qname, dns.TypeNS, ownedBy(qname, z.records[z.apex][dns.TypeNS]), nil, z.nameServerAddresses())
@@ -182,7 +182,7 @@ func anyAnswer(owner string, ttl uint32) dns.RR {
 	return &dns.HINFO{Hdr: header(owner, dns.TypeHINFO, ttl), Cpu: "RFC8482", Os: ""}
 }
 
-// canHaveChild reports whether a name that owns nothing exists all the same, as the parent a name below it may have (B2): a name too long for any child is the only one the server can show to be empty below.
+// canHaveChild reports whether a name that owns nothing exists all the same, as the parent a name below it may have: a name too long for any child is the only one the server can show to be empty below.
 func canHaveChild(name string) bool {
 	if len(name) <= maxParentPresentationLength {
 		return true

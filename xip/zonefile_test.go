@@ -441,7 +441,7 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 	}
 }
 
-// TestParseZoneFileUnderAnOriginThatCarriesAnAddress checks that F15 and F18 look for an address in the labels below the apex only, as queries do (decision 15).
+// TestParseZoneFileUnderAnOriginThatCarriesAnAddress checks that the rule on owners that carry an address and the rule on MX and SRV targets look for an address in the labels below the apex only, as queries do.
 func TestParseZoneFileUnderAnOriginThatCarriesAnAddress(t *testing.T) {
 	const domain = "10-0-0-1.example.test"
 	const origin = domain + "."
@@ -628,32 +628,32 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 		prefix bool
 	}{
 		{
-			name:    "F1 class other than IN",
+			name:    "class other than IN",
 			content: "sub CH NS ns.other.test.\n",
 			want:    recordFault("sub.example.test.", "NS", "class CH is not supported, only IN"),
 		},
 		{
-			name:    "F2 PTR record",
+			name:    "PTR record",
 			content: "www PTR other.test.\n",
 			want:    recordFault("www.example.test.", "PTR", fmt.Sprintf(unsupported, "PTR")),
 		},
 		{
-			name:    "F2 SOA record at the apex",
+			name:    "SOA record at the apex",
 			content: "@ SOA ns1 admin 1 900 900 1800 300\n",
 			want:    recordFault("example.test.", "SOA", fmt.Sprintf(unsupported, "SOA")),
 		},
 		{
-			name:    "F2 DNAME record",
+			name:    "DNAME record",
 			content: "www DNAME other.test.\n",
 			want:    recordFault("www.example.test.", "DNAME", fmt.Sprintf(unsupported, "DNAME")),
 		},
 		{
-			name:    "F2 HTTPS record",
+			name:    "HTTPS record",
 			content: "www HTTPS 1 . alpn=h2\n",
 			want:    recordFault("www.example.test.", "HTTPS", fmt.Sprintf(unsupported, "HTTPS")),
 		},
 		{
-			name:    "F2 record of an unassigned type",
+			name:    "record of an unassigned type",
 			content: `www TYPE65280 \# 1 00` + "\n",
 			want:    recordFault("www.example.test.", "TYPE65280", fmt.Sprintf(unsupported, "TYPE65280")),
 		},
@@ -670,22 +670,22 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			prefix:  true,
 		},
 		{
-			name:    "F4 TXT record of exactly 65535 octets of data outside the zone",
+			name:    "TXT record of exactly 65535 octets of data outside the zone",
 			content: "www.other.test. TXT \"" + strings.Repeat("x", 65279) + "\"\n",
 			want:    recordFault("www.other.test.", "TXT", "owner is outside the zone example.test."),
 		},
 		{
-			name:    "F19 TXT record of exactly 65535 octets of data inside the zone",
+			name:    "TXT record of exactly 65535 octets of data inside the zone has too large an answer",
 			content: "big TXT \"" + strings.Repeat("x", 65279) + "\"\n",
 			want:    "zone file test.zone: the answer for big.example.test. TXT takes 65581 octets, more than the limit of 65524 octets for a DNS message",
 		},
 		{
-			name:    "F4 NS record outside the zone",
+			name:    "NS record outside the zone",
 			content: "sub.other.test. NS ns.other.test.\n",
 			want:    recordFault("sub.other.test.", "NS", "owner is outside the zone example.test."),
 		},
 		{
-			name:    "F4 TXT record outside the zone",
+			name:    "TXT record outside the zone",
 			content: "www.other.test. TXT \"x\"\n",
 			want:    recordFault("www.other.test.", "TXT", "owner is outside the zone example.test."),
 		},
@@ -695,277 +695,277 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("www.other.test.", "TXT", "owner is outside the zone example.test."),
 		},
 		{
-			name:    "F5 NS record at the apex",
+			name:    "NS record at the apex",
 			content: "@ NS ns.other.test.\n",
 			want:    recordFault("example.test.", "NS", "an NS record must be below the apex example.test.: the zone's own name servers come from the configuration"),
 		},
 		{
-			name:    "F6 wildcard owner",
+			name:    "wildcard owner",
 			content: "*.sub NS ns.other.test.\n",
 			want:    recordFault("*.sub.example.test.", "NS", "wildcard owners are not supported"),
 		},
 		{
-			name:    "F6 wildcard label spelled with a decimal escape",
+			name:    "wildcard label spelled with a decimal escape",
 			content: `\042.sub NS ns.other.test.` + "\n",
 			want:    recordFault("*.sub.example.test.", "NS", "wildcard owners are not supported"),
 		},
 		{
-			name:    "F6 wildcard TXT record",
+			name:    "wildcard TXT record",
 			content: "*.www TXT \"x\"\n",
 			want:    recordFault("*.www.example.test.", "TXT", "wildcard owners are not supported"),
 		},
 		{
-			name:    "F7 duplicate glue record",
+			name:    "duplicate glue record",
 			content: validDelegation + "ns1.sub A 192.0.2.1\n",
 			want:    recordFault("ns1.sub.example.test.", "A", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate record differing only in case and TTL",
+			name:    "duplicate record differing only in case and TTL",
 			content: "sub NS ns.other.test.\nSUB 600 NS NS.OTHER.TEST.\n",
 			want:    recordFault("sub.example.test.", "NS", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate record spelled with a decimal escape",
+			name:    "duplicate record spelled with a decimal escape",
 			content: "sub NS ns.other.test.\n" + `\115ub NS ns.other.test.` + "\n",
 			want:    recordFault("sub.example.test.", "NS", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate MX record whose targets differ in case",
+			name:    "duplicate MX record whose targets differ in case",
 			content: "@ MX 10 mail.other.test.\n@ MX 10 MAIL.other.test.\n",
 			want:    recordFault("example.test.", "MX", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate TXT record whose string is written with a decimal escape",
+			name:    "duplicate TXT record whose string is written with a decimal escape",
 			content: "www TXT \"a\"\n" + `www TXT "\097"` + "\n",
 			want:    recordFault("www.example.test.", "TXT", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate CAA record whose value is written with a decimal escape",
+			name:    "duplicate CAA record whose value is written with a decimal escape",
 			content: "www CAA 0 issue \"a\"\n" + `www CAA 0 issue "\097"` + "\n",
 			want:    recordFault("www.example.test.", "CAA", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate written with an escape and another TTL is reported as a duplicate before F8",
+			name:    "duplicate written with an escape and another TTL is reported as a duplicate, not as a TTL mismatch",
 			content: "www TXT \"a\"\n" + `www 60 TXT "\097"` + "\n",
 			want:    recordFault("www.example.test.", "TXT", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F7 duplicate AAAA record written in two spellings",
+			name:    "duplicate AAAA record written in two spellings",
 			content: "www AAAA 2001:db8::1\nwww AAAA 2001:0db8:0:0:0:0:0:0001\n",
 			want:    recordFault("www.example.test.", "AAAA", "duplicate of an earlier record"),
 		},
 		{
-			name:    "F18 SRV record whose target is a name of the zone without any record",
+			name:    "SRV record whose target is a name of the zone without any record",
 			content: "_sip._tcp SRV 0 5 5060 missing\n",
 			want:    recordFault("_sip._tcp.example.test.", "SRV", "target missing.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
-			name:    "F8 NS records of one set with different TTLs",
+			name:    "NS records of one set with different TTLs",
 			content: "sub 300 NS a.other.test.\nsub 600 NS b.other.test.\n",
 			want:    recordFault("sub.example.test.", "NS", "TTL 600 differs from TTL 300 of an earlier record with the same owner and type"),
 		},
 		{
-			name:    "F8 TXT records of one set with different TTLs",
+			name:    "TXT records of one set with different TTLs",
 			content: "www 300 TXT \"a\"\nwww 60 TXT \"b\"\n",
 			want:    recordFault("www.example.test.", "TXT", "TTL 60 differs from TTL 300 of an earlier record with the same owner and type"),
 		},
 		{
-			name:    "F9 cut below another cut",
+			name:    "cut below another cut",
 			content: "sub NS ns.other.test.\na.sub NS ns.other.test.\n",
 			want:    recordFault("a.sub.example.test.", "NS", "delegation is nested below the delegation sub.example.test."),
 		},
 		{
-			name:    "F9 cut below another cut declared first",
+			name:    "cut below another cut declared first",
 			content: "a.sub NS ns.other.test.\nsub NS ns.other.test.\n",
 			want:    recordFault("a.sub.example.test.", "NS", "delegation is nested below the delegation sub.example.test."),
 		},
 		{
-			name:    "F9 cut below another cut spelled with a decimal escape",
+			name:    "cut below another cut spelled with a decimal escape",
 			content: "sub NS ns.other.test.\n" + `a.\115ub NS ns.other.test.` + "\n",
 			want:    recordFault("a.sub.example.test.", "NS", "delegation is nested below the delegation sub.example.test."),
 		},
 		{
-			name:    "F10 cut spelled with decimal escapes equal to a name server of the server",
+			name:    "cut spelled with decimal escapes equal to a name server of the server",
 			content: `\110\115\049 NS ns.other.test.` + "\n",
 			want:    recordFault("ns1.example.test.", "NS", "ns1.example.test. is reserved and cannot be delegated"),
 		},
 		{
-			name:    "F10 cut equal to a name server of the server",
+			name:    "cut equal to a name server of the server",
 			content: "ns1 NS ns.other.test.\n",
 			want:    recordFault("ns1.example.test.", "NS", "ns1.example.test. is reserved and cannot be delegated"),
 		},
 		{
-			name:    "F10 cut equal to a name server given in non-canonical form",
+			name:    "cut equal to a name server the server is given in non-canonical form",
 			content: "ns2 NS ns.other.test.\n",
 			want:    recordFault("ns2.example.test.", "NS", "ns2.example.test. is reserved and cannot be delegated"),
 		},
 		{
-			name:    "F10 cut equal to the ACME challenge name, given with a decimal escape",
+			name:    "cut equal to the ACME challenge name, which the server is given with a decimal escape",
 			content: "_acme-challenge NS ns.other.test.\n",
 			want:    recordFault("_acme-challenge.example.test.", "NS", "_acme-challenge.example.test. is reserved and cannot be delegated"),
 		},
 		{
-			name:    "F11 name server elsewhere inside the zone",
+			name:    "name server elsewhere inside the zone",
 			content: "sub NS ns.other\nns.other A 192.0.2.1\n",
 			want:    recordFault("sub.example.test.", "NS", "name server ns.other.example.test. is inside the zone example.test. but outside the delegated zone sub.example.test.; it must be inside the delegated zone (with glue) or outside the zone"),
 		},
 		{
-			name:    "F11 name server spelled with a decimal escape is one of the server's own name servers",
+			name:    "name server spelled with a decimal escape is one of the server's own name servers",
 			content: `sub NS ns1.\101xample.test.` + "\n",
 			want:    recordFault("sub.example.test.", "NS", "name server ns1.example.test. is inside the zone example.test. but outside the delegated zone sub.example.test.; it must be inside the delegated zone (with glue) or outside the zone"),
 		},
 		{
-			name:    "F11 name server is the apex",
+			name:    "name server is the apex",
 			content: "sub NS @\n",
 			want:    recordFault("sub.example.test.", "NS", "name server example.test. is inside the zone example.test. but outside the delegated zone sub.example.test.; it must be inside the delegated zone (with glue) or outside the zone"),
 		},
 		{
-			name:    "F11 two cuts whose name servers sit inside each other",
+			name:    "two cuts whose name servers sit inside each other",
 			content: "one NS ns.two\ntwo NS ns.one\nns.one A 192.0.2.1\nns.two A 192.0.2.2\n",
 			want:    recordFault("one.example.test.", "NS", "name server ns.two.example.test. is inside the zone example.test. but outside the delegated zone one.example.test.; it must be inside the delegated zone (with glue) or outside the zone"),
 		},
 		{
-			name:    "F11 in-cut name server without glue",
+			name:    "in-cut name server without glue",
 			content: "sub NS ns1.sub\n",
 			want:    recordFault("sub.example.test.", "NS", "name server ns1.sub.example.test. is inside the delegated zone and has no A or AAAA glue record"),
 		},
 		{
-			name:    "F12 address record inside a cut that is not a name server",
+			name:    "address record inside a cut that is not a name server",
 			content: validDelegation + "www.sub AAAA 2001:db8::2\n",
 			want:    recordFault("www.sub.example.test.", "AAAA", "address record is not glue: www.sub.example.test. is not a name server of the delegation sub.example.test."),
 		},
 		{
-			name:    "F12 A glue equal to one of the server's own addresses",
+			name:    "A glue equal to one of the server's own addresses",
 			content: "sub NS ns1.sub\nns1.sub A 198.51.100.10\n",
 			want:    recordFault("ns1.sub.example.test.", "A", "name server ns1.sub.example.test. has the address 198.51.100.10, which is one of this server's own name server addresses; the delegation would point back at this server"),
 		},
 		{
-			name:    "F12 AAAA glue equal to one of the server's own addresses",
+			name:    "AAAA glue equal to one of the server's own addresses",
 			content: "sub NS ns1.sub\nns1.sub AAAA 2001:db8:ffff::10\n",
 			want:    recordFault("ns1.sub.example.test.", "AAAA", "name server ns1.sub.example.test. has the address 2001:db8:ffff::10, which is one of this server's own name server addresses; the delegation would point back at this server"),
 		},
 		{
-			name:    "F12 IPv4-mapped AAAA glue equal to one of the server's own addresses",
+			name:    "IPv4-mapped AAAA glue equal to one of the server's own addresses",
 			content: "sub NS ns1.sub\nns1.sub AAAA ::ffff:198.51.100.10\n",
 			want:    recordFault("ns1.sub.example.test.", "AAAA", "name server ns1.sub.example.test. has the address 198.51.100.10, which is one of this server's own name server addresses; the delegation would point back at this server"),
 		},
 		{
-			name:    "F12 TXT record at a cut",
+			name:    "TXT record at a cut",
 			content: validDelegation + "sub TXT \"x\"\n",
 			want:    recordFault("sub.example.test.", "TXT", "sub.example.test. is at or below the delegation sub.example.test., where this server answers with a referral: only the addresses of its name servers can be declared there"),
 		},
 		{
-			name:    "F12 MX record below a cut",
+			name:    "MX record below a cut",
 			content: validDelegation + "mail.sub MX 10 mail.other.test.\n",
 			want:    recordFault("mail.sub.example.test.", "MX", "mail.sub.example.test. is at or below the delegation sub.example.test., where this server answers with a referral: only the addresses of its name servers can be declared there"),
 		},
 		{
-			name:    "F13 TXT record at a name server of the server",
+			name:    "TXT record at a name server of the server",
 			content: "ns1 TXT \"x\"\n",
 			want:    recordFault("ns1.example.test.", "TXT", "ns1.example.test. is reserved: the server answers for it itself"),
 		},
 		{
-			name:    "F13 A record at a name server of the server",
+			name:    "A record at a name server of the server",
 			content: "ns2 A 192.0.2.2\n",
 			want:    recordFault("ns2.example.test.", "A", "ns2.example.test. is reserved: the server answers for it itself"),
 		},
 		{
-			name:    "F13 TXT record at the ACME challenge name",
+			name:    "TXT record at the ACME challenge name",
 			content: "_acme-challenge TXT \"x\"\n",
 			want:    recordFault("_acme-challenge.example.test.", "TXT", "_acme-challenge.example.test. is reserved: the server answers for it itself"),
 		},
 		{
-			name:    "F14 A record at the apex",
+			name:    "A record at the apex",
 			content: "@ A 192.0.2.1\n",
 			want:    recordFault("example.test.", "A", "the A records of the apex are the configured name server addresses"),
 		},
 		{
-			name:    "F14 CNAME record at the apex",
+			name:    "CNAME record at the apex",
 			content: "@ CNAME target.other.test.\n",
 			want:    recordFault("example.test.", "CNAME", "a CNAME record cannot be at the apex"),
 		},
 		{
-			name:    "F15 TXT record at a dashed address",
+			name:    "TXT record at a dashed address",
 			content: "10-0-0-1 TXT \"x\"\n",
 			want:    recordFault("10-0-0-1.example.test.", "TXT", "10-0-0-1.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
 		},
 		{
-			name:    "F15 TXT record at a dashed address after a name in its label",
+			name:    "TXT record at a dashed address after a name in its label",
 			content: "app-10-0-0-1 TXT \"x\"\n",
 			want:    recordFault("app-10-0-0-1.example.test.", "TXT", "app-10-0-0-1.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
 		},
 		{
-			name:    "F15 A record below a dashed address",
+			name:    "A record below a dashed address",
 			content: "app.10-0-0-1 A 192.0.2.1\n",
 			want:    recordFault("app.10-0-0-1.example.test.", "A", "app.10-0-0-1.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
 		},
 		{
-			name:    "F15 MX record above a dotted address",
+			name:    "MX record above a dotted address",
 			content: "10.0.0.1.app MX 10 mail.other.test.\n",
 			want:    recordFault("10.0.0.1.app.example.test.", "MX", "10.0.0.1.app.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
 		},
 		{
-			name:    "F16 CNAME record before a TXT record at one name",
+			name:    "CNAME record before a TXT record at one name",
 			content: "www CNAME target.other.test.\nwww TXT \"x\"\n",
 			want:    recordFault("www.example.test.", "CNAME", "www.example.test. has a CNAME record and other records: a CNAME must be alone at its name"),
 		},
 		{
-			name:    "F16 TXT record before a CNAME record at one name",
+			name:    "TXT record before a CNAME record at one name",
 			content: "www TXT \"x\"\nwww CNAME target.other.test.\n",
 			want:    recordFault("www.example.test.", "TXT", "www.example.test. has a CNAME record and other records: a CNAME must be alone at its name"),
 		},
 		{
-			name:    "F16 two CNAME records at one name",
+			name:    "two CNAME records at one name",
 			content: "www CNAME a.other.test.\nwww CNAME b.other.test.\n",
 			want:    recordFault("www.example.test.", "CNAME", "www.example.test. has more than one CNAME record"),
 		},
 		{
-			name:    "F17 CNAME target at the apex",
+			name:    "CNAME target at the apex",
 			content: "alias CNAME @\n",
 			want:    recordFault("alias.example.test.", "CNAME", "CNAME target example.test. is inside the zone example.test.: only targets outside the zone are supported"),
 		},
 		{
-			name:    "F17 CNAME target below the apex",
+			name:    "CNAME target below the apex",
 			content: "alias CNAME www\nwww A 192.0.2.80\n",
 			want:    recordFault("alias.example.test.", "CNAME", "CNAME target www.example.test. is inside the zone example.test.: only targets outside the zone are supported"),
 		},
 		{
-			name:    "F17 CNAME target inside a cut",
+			name:    "CNAME target inside a cut",
 			content: "alias CNAME www.sub\nsub NS ns.other.test.\n",
 			want:    recordFault("alias.example.test.", "CNAME", "CNAME target www.sub.example.test. is inside the zone example.test.: only targets outside the zone are supported"),
 		},
 		{
-			name:    "F18 MX record whose target owns a CNAME record",
+			name:    "MX record whose target owns a CNAME record",
 			content: "@ MX 10 alias\nalias CNAME target.other.test.\n",
 			want:    recordFault("example.test.", "MX", "target alias.example.test. is an alias: the target of an MX or SRV record must not own a CNAME record"),
 		},
 		{
-			name:    "F18 SRV record whose target owns a CNAME record",
+			name:    "SRV record whose target owns a CNAME record",
 			content: "_sip._tcp SRV 0 5 5060 alias\nalias CNAME target.other.test.\n",
 			want:    recordFault("_sip._tcp.example.test.", "SRV", "target alias.example.test. is an alias: the target of an MX or SRV record must not own a CNAME record"),
 		},
 		{
-			name:    "F18 MX record whose target is a name of the zone without any record",
+			name:    "MX record whose target is a name of the zone without any record",
 			content: "@ MX 10 mial\nmail A 192.0.2.25\n",
 			want:    recordFault("example.test.", "MX", "target mial.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
-			name:    "F18 MX record whose target is an empty non-terminal",
+			name:    "MX record whose target is an empty non-terminal",
 			content: "@ MX 10 er.name\ndeep.er.name A 192.0.2.25\n",
 			want:    recordFault("example.test.", "MX", "target er.name.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
-			name:    "F18 MX record whose target owns only a TXT record",
+			name:    "MX record whose target owns only a TXT record",
 			content: "@ MX 10 mail\nmail TXT \"x\"\n",
 			want:    recordFault("example.test.", "MX", "target mail.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
-			name:    "F18 MX record whose target is the ACME challenge name",
+			name:    "MX record whose target is the ACME challenge name",
 			content: "@ MX 10 _acme-challenge\n",
 			want:    recordFault("example.test.", "MX", "target _acme-challenge.example.test. is inside the zone example.test. and has no address record"),
 		},
 		{
-			name:    "F19 referral larger than a DNS message",
+			name:    "referral larger than a DNS message",
 			content: manyNameServers(oversizedNameServerCount),
 			want:    fmt.Sprintf("zone file test.zone: delegation sub.example.test.: the largest referral takes %d octets, more than the limit of 65524 octets for a DNS message", manyNameServersReferralSize(t, oversizedNameServerCount)),
 		},
@@ -1091,27 +1091,27 @@ func TestParseZoneFileReportsFaultsInOrder(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "a record-by-record fault (F2) comes before a fault of the delegations (F9) declared earlier",
+			name:    "an unsupported type comes before a nested delegation declared earlier",
 			content: "sub NS ns.other.test.\na.sub NS ns.other.test.\nwww PTR other.test.\n",
 			want:    recordFault("www.example.test.", "PTR", "type PTR is not supported: the zone file takes NS records for delegations and A, AAAA, CAA, CNAME, MX, SRV and TXT records"),
 		},
 		{
-			name:    "a record-by-record fault (F8) comes before a fault of the records (F13) declared earlier",
+			name:    "TTLs that differ within a record set come before a record at a reserved name declared earlier",
 			content: "ns1 TXT \"x\"\nwww 300 TXT \"a\"\nwww 600 TXT \"b\"\n",
 			want:    recordFault("www.example.test.", "TXT", "TTL 600 differs from TTL 300 of an earlier record with the same owner and type"),
 		},
 		{
-			name:    "a fault of the delegations (F11) comes before a fault of the records (F12) declared earlier",
+			name:    "a name server without glue comes before a record below a cut declared earlier",
 			content: "www.sub TXT \"x\"\nsub NS ns1.sub\n",
 			want:    recordFault("sub.example.test.", "NS", "name server ns1.sub.example.test. is inside the delegated zone and has no A or AAAA glue record"),
 		},
 		{
-			name:    "a fault of the records (F17) comes before a fault of the targets (F18) declared earlier",
+			name:    "a CNAME target inside the zone comes before an MX target without an address declared earlier",
 			content: "@ MX 10 mial\nalias CNAME www\nwww A 192.0.2.80\n",
 			want:    recordFault("alias.example.test.", "CNAME", "CNAME target www.example.test. is inside the zone example.test.: only targets outside the zone are supported"),
 		},
 		{
-			name:    "a fault of the targets (F18) comes before a size fault (F19) declared earlier",
+			name:    "an MX target without an address comes before an answer too large declared earlier",
 			content: "big TXT \"" + strings.Repeat("x", 65279) + "\"\n@ MX 10 mial\n",
 			want:    recordFault("example.test.", "MX", "target mial.example.test. is inside the zone example.test. and has no address record"),
 		},
@@ -1121,12 +1121,12 @@ func TestParseZoneFileReportsFaultsInOrder(t *testing.T) {
 			want:    "zone file test.zone: the answer for big.example.test. TXT takes 65581 octets, more than the limit of 65524 octets for a DNS message",
 		},
 		{
-			name:    "one record is checked against F15 before F16",
+			name:    "one record is checked for an owner that carries an address before the CNAME rules",
 			content: "10-0-0-1 CNAME target.other.test.\n10-0-0-1 TXT \"x\"\n",
 			want:    recordFault("10-0-0-1.example.test.", "CNAME", "10-0-0-1.example.test. carries the address 10.0.0.1 and resolves to it: it cannot have records of its own"),
 		},
 		{
-			name:    "one record is checked against F12 before F13 to F17",
+			name:    "one record is checked for an owner below a cut before the other rules on records",
 			content: "sub NS ns.other.test.\nalias.sub CNAME www\n",
 			want:    recordFault("alias.sub.example.test.", "CNAME", "alias.sub.example.test. is at or below the delegation sub.example.test., where this server answers with a referral: only the addresses of its name servers can be declared there"),
 		},
@@ -1138,7 +1138,7 @@ func TestParseZoneFileReportsFaultsInOrder(t *testing.T) {
 		})
 	}
 
-	t.Run("a record that cannot be encoded is reported as such before F4", func(t *testing.T) {
+	t.Run("a record that cannot be encoded is reported as such before an owner outside the zone", func(t *testing.T) {
 		expectZoneFileErrorPrefix(t, "www.other.test. CAA 0 "+strings.Repeat("x", 256)+" \"v\"\n", recordFault("www.other.test.", "CAA", "cannot be encoded: "))
 	})
 }

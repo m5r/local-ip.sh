@@ -153,7 +153,7 @@ func recordError(file string, rr dns.RR, format string, args ...any) error {
 	return fmt.Errorf("zone file %s: record %s %s: %s", file, hdr.Name, dns.Type(hdr.Rrtype), fmt.Sprintf(format, args...))
 }
 
-// readZoneRecords parses the file, canonicalises names and applies the rules that concern a record on its own or against the records before it (F1 to F8).
+// readZoneRecords parses the file, canonicalises names and applies the rules that concern a record on its own or against the records before it.
 func readZoneRecords(r io.Reader, file string, apex string) ([]dns.RR, error) {
 	content, err := io.ReadAll(r)
 	if err != nil {
@@ -274,7 +274,7 @@ func canonicaliseTarget(rr dns.RR) error {
 	return nil
 }
 
-// checkNameServers applies the rules on cuts and their name servers (F9 to F11).
+// checkNameServers applies the rules on cuts and their name servers.
 func (zc *zoneCuts) checkNameServers(records []dns.RR, file string, reserved map[string]bool, addresses map[string]bool) error {
 	for _, rr := range records {
 		ns, ok := rr.(*dns.NS)
@@ -302,7 +302,7 @@ func (zc *zoneCuts) checkNameServers(records []dns.RR, file string, reserved map
 }
 
 // separateRecords adds every address record inside a cut to the delegation it is glue for and returns the other records, the records of the zone, in file order.
-// It applies the rules on records against the whole file (F12 to F17), each record against the rules in that order.
+// It applies the rules on records against the whole file, each record against all of them, in the order they are written, before the next record.
 func (zc *zoneCuts) separateRecords(records []dns.RR, file string, names zoneNames, ownAddresses []netip.Addr) ([]dns.RR, error) {
 	cnames := make(map[string]int)
 	others := make(map[string]int)
@@ -359,7 +359,7 @@ func (zc *zoneCuts) separateRecords(records []dns.RR, file string, names zoneNam
 	return zoneRecords, nil
 }
 
-// attachGlue adds an address record inside the cut to its delegation, rejecting a record that is not glue or that points back at one of this server's own name servers (F12).
+// attachGlue adds an address record inside the cut to its delegation, rejecting a record that is not glue or that points back at one of this server's own name servers.
 func (zc *zoneCuts) attachGlue(rr dns.RR, file string, cut string, d delegation, ownAddresses []netip.Addr) error {
 	owner := rr.Header().Name
 	if rrtype := rr.Header().Rrtype; rrtype != dns.TypeA && rrtype != dns.TypeAAAA {
@@ -376,7 +376,7 @@ func (zc *zoneCuts) attachGlue(rr dns.RR, file string, cut string, d delegation,
 	return nil
 }
 
-// checkTargets requires the target of an MX or SRV record that this server answers for to have an address and not to be an alias (F18).
+// checkTargets requires the target of an MX or SRV record that this server answers for to have an address and not to be an alias.
 func (zc *zoneCuts) checkTargets(zoneRecords []dns.RR, file string, names zoneNames) error {
 	aliases := make(map[string]bool)
 	addressOwners := make(map[string]bool)
@@ -416,7 +416,7 @@ func (zc *zoneCuts) checkTargets(zoneRecords []dns.RR, file string, names zoneNa
 	return nil
 }
 
-// checkAnswerSizes measures the answer for every record set of the zone, in file order of its first record (F19).
+// checkAnswerSizes measures the answer for every record set of the zone, in file order of its first record.
 func checkAnswerSizes(zoneRecords []dns.RR, file string) error {
 	type setKey struct {
 		owner  string

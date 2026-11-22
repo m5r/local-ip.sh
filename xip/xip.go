@@ -118,7 +118,7 @@ func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) 
 	xip.logResolved(message)
 }
 
-// answer fills message, the reply SetReply built for request, by the first rule of B3 that matches.
+// answer fills message, the reply SetReply built for request, by the first rule below that matches.
 // The refusals look at the request: SetReply keeps only its first question.
 func (xip *Xip) answer(request, message *dns.Msg) {
 	if request.Opcode != dns.OpcodeQuery {

@@ -156,7 +156,7 @@ func pause(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// checkReplyHeader checks the header fields every reply to the query must have: the client matches a reply by its id alone, so a message that is no reply to a standard query, or one that does not copy the RD flag of the query (B3), would otherwise pass.
+// checkReplyHeader checks the header fields every reply to the query must have: the client matches a reply by its id alone, so a message that is no reply to a standard query, or one that does not copy the RD flag of the query, would otherwise pass.
 func checkReplyHeader(q dnsQuery, resp *dns.Msg) error {
 	if !resp.Response {
 		return errors.New("QR flag is clear, want it set on a reply")
@@ -343,7 +343,7 @@ func (tc dnsCase) query(path dnsPath) dnsQuery {
 }
 
 // checkReplyOnPath checks the AA flag a case asks for, the owners of the answer records and, on a reply straight from a name server, the flags an authoritative-only server without DNSSEC never sets: it offers no recursion, validates nothing and so must not echo CD.
-// A name server owns its answer records by the question name exactly as asked (B4), which is also what keeps the size of a reply the same whatever the case of the question; a resolver may spell the owner its own way.
+// A name server owns its answer records by the question name exactly as asked, which is also what keeps the size of a reply the same whatever the case of the question; a resolver may spell the owner its own way.
 func checkReplyOnPath(tc dnsCase, path dnsPath, resp *dns.Msg) error {
 	var problems []error
 	if len(resp.Question) == 1 {
@@ -1101,7 +1101,7 @@ func publicResolverCases(tg *target, label func() string) []dnsCase {
 	cases := []dnsCase{
 		{name: "dashed with random prefix", qname: label() + ".10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		{name: "dashed with random prefix in the label", qname: label() + "-10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
-		// The resolver minimises the query name on its way and passes through 13.<zone>, 12.13.<zone> and 11.12.13.<zone>, which used to answer NXDOMAIN.
+		// The resolver minimises the query name on its way and passes through 13.<zone>, 12.13.<zone> and 11.12.13.<zone>, where an NXDOMAIN would tell it that nothing exists below (RFC 8020).
 		{name: "dotted with random prefix", qname: label() + ".10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, check: expectNS(tg.nameServerHosts(), nil)},
 	}
@@ -1475,7 +1475,7 @@ func TestCheckNegativeReplies(t *testing.T) {
 	}
 }
 
-// testTarget is the target of the example zone of the spec, example.test with two name servers.
+// testTarget is the target of the example zone, example.test with two name servers.
 func testTarget() *target {
 	return &target{
 		domain:      "example.test",
