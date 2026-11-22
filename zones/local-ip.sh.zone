@@ -1,10 +1,4 @@
 ; Zone file of the production instance, origin local-ip.sh.
-; xip-staging.local-ip.sh is served by the staging instance (Fly app local-ip-staging).
-; A delegation takes every name below its label away from this instance, including names that
-; carry an address: 10-0-0-1.staging.local-ip.sh is a name of the service. Only labels that start
-; with xip-, which are reserved for the project, may be delegated here.
-xip-staging      NS  ns1.xip-staging
-ns1.xip-staging  A   149.248.203.129
 ; Mail for the domain is handled by mail.mial.net; the DKIM selectors are that server's keys for this domain.
 @                   MX     10 mail.mial.net.
 @                   TXT    "v=spf1 mx -all"

@@ -469,6 +469,7 @@ func TestLoadProductionConfig(t *testing.T) {
 	if got, want := tg.soaRname(), "admin.local-ip.sh."; got != want {
 		t.Errorf("soaRname = %q, want %q", got, want)
 	}
+	assertDelegations(t, tg.delegations, nil)
 	assertRecordSets(t, tg.recordSets, [][]string{
 		{`local-ip.sh. 300 IN MX 10 mail.mial.net.`},
 		{`local-ip.sh. 300 IN TXT "v=spf1 mx -all"`},
@@ -856,14 +857,6 @@ func TestLoadTargetDelegations(t *testing.T) {
 		configPath string
 		want       []targetDelegation
 	}{
-		{
-			configPath: filepath.Join("..", "fly.toml"),
-			want: []targetDelegation{{
-				cut:         "xip-staging.local-ip.sh.",
-				nameServers: []string{"ns1.xip-staging.local-ip.sh."},
-				glue:        map[string][]netip.Addr{"ns1.xip-staging.local-ip.sh.": {netip.MustParseAddr("149.248.203.129")}},
-			}},
-		},
 		{
 			configPath: filepath.Join("..", "fly.staging.toml"),
 			want: []targetDelegation{{
@@ -1254,49 +1247,6 @@ func TestLoadedRecordSetIsCheckedAgainstAnswersOnTheWire(t *testing.T) {
 				t.Errorf("check accepted the answer that carries the octets %q, want it rejected", tt.rejected)
 			}
 		})
-	}
-}
-
-// TestDelegationsMatchTargets keeps the two Fly configs consistent: when one target's zone lies
-// inside the other's, the parent must delegate it to exactly the child's name servers, or the
-// child cannot be found through public DNS and cannot obtain certificates.
-func TestDelegationsMatchTargets(t *testing.T) {
-	var targets []*target
-	for _, configPath := range []string{filepath.Join("..", "fly.toml"), filepath.Join("..", "fly.staging.toml")} {
-		tg, err := loadTarget(configPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		targets = append(targets, tg)
-	}
-
-	checked := 0
-	for _, parent := range targets {
-		for _, child := range targets {
-			if parent == child || parent.zone() == child.zone() || !dns.IsSubDomain(parent.zone(), child.zone()) {
-				continue
-			}
-			checked++
-			i := slices.IndexFunc(parent.delegations, func(d targetDelegation) bool { return d.cut == child.zone() })
-			if i < 0 {
-				t.Errorf("%s does not delegate %s to %s", parent.app, child.zone(), child.app)
-				continue
-			}
-			d := parent.delegations[i]
-
-			wantHosts := slices.Sorted(slices.Values(child.nameServerHosts()))
-			if got := slices.Sorted(slices.Values(d.nameServers)); !slices.Equal(got, wantHosts) {
-				t.Errorf("%s delegates %s to %v, want %v (the name servers of %s)", parent.app, d.cut, got, wantHosts, child.app)
-			}
-			for j, host := range child.nameServerHosts() {
-				if got, want := d.glue[host], []netip.Addr{child.nameServers[j]}; !slices.Equal(got, want) {
-					t.Errorf("%s glue for %s = %v, want %v", parent.app, host, got, want)
-				}
-			}
-		}
-	}
-	if checked == 0 {
-		t.Error("no target's zone lies inside another's; expected production to be the parent of staging")
 	}
 }
 

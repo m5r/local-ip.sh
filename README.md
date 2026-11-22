@@ -90,7 +90,7 @@ ns1.sub  A   192.0.2.1
 
 For any query at or below `sub.example.com`, whatever its type, the server answers with a referral instead of answering itself: no answer, the AA flag clear, the delegation's NS records in the authority section and the glue addresses in the additional section (a DS query for `sub.example.com` itself is still answered by this server, as DS records belong to the parent zone).
 
-A delegation takes every name at or below the label away from the server, including names that carry an address: with the zone file above, `10-0-0-1.sub.example.com` gets the referral, not `10.0.0.1`. Only delegate labels you have set aside for the purpose. On the hosted instance, labels directly below `local-ip.sh` that start with `xip-` are reserved for the project: `xip-staging.local-ip.sh` is delegated to its test instance, and names under a reserved label are not part of the service.
+A delegation takes every name at or below the label away from the server, including names that carry an address: with the zone file above, `10-0-0-1.sub.example.com` gets the referral, not `10.0.0.1`. Only delegate labels you have set aside for the purpose. On the hosted instance, labels directly below `local-ip.sh` that start with `xip-` are reserved for the project, and names under a reserved label are not part of the service.
 
 ### Records
 

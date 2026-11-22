@@ -1501,7 +1501,7 @@ func TestRepositoryZoneFiles(t *testing.T) {
 			nameServers:   []string{"ns1.local-ip.sh.", "ns2.local-ip.sh."},
 			challengeName: "_acme-challenge.local-ip.sh.",
 			addresses:     []netip.Addr{netip.MustParseAddr("137.66.40.11"), netip.MustParseAddr("137.66.40.12")},
-			cuts:          []string{"xip-staging.local-ip.sh."},
+			cuts:          nil,
 			records: []string{
 				"local-ip.sh. 300 IN MX 10 mail.mial.net.",
 				`local-ip.sh. 300 IN TXT "v=spf1 mx -all"`,
