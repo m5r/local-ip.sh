@@ -320,8 +320,8 @@ func TestAnswers(t *testing.T) {
 			request *dns.Msg
 			want    answerWant
 		}{
-			{name: "example.test. SOA with CD and AD set", request: askWith(exampleApex, dns.TypeSOA, withCD, withAD), want: positive("{q} 300 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 300")},
-			{name: "10-0-0-1.example.test. A with RD set", request: askWith("10-0-0-1.example.test.", dns.TypeA, withRD), want: positive("{q} 300 IN A 10.0.0.1")},
+			{name: "example.test. SOA with CD and AD set", request: askWith(exampleApex, dns.TypeSOA, withCD, withAD), want: positive("{q} 3600 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 3600")},
+			{name: "10-0-0-1.example.test. A with RD set", request: askWith("10-0-0-1.example.test.", dns.TypeA, withRD), want: positive("{q} 86400 IN A 10.0.0.1")},
 			{name: "sub.example.test. NS with CD set", request: askWith("sub.example.test.", dns.TypeNS, withCD), want: answerWant{
 				rcode:      dns.RcodeSuccess,
 				authority:  []string{"sub.example.test. 300 IN NS ns1.sub.example.test.", "sub.example.test. 300 IN NS ns.other.test."},
@@ -358,7 +358,7 @@ func TestAnswersInTheCaseAsked(t *testing.T) {
 		want  string
 	}{
 		{name: "a static name", qname: "wWw.ExAmPlE.tEsT.", want: "{q} 300 IN A 192.0.2.80"},
-		{name: "a name that carries an address", qname: "App.10-0-0-1.EXAMPLE.test.", want: "{q} 300 IN A 10.0.0.1"},
+		{name: "a name that carries an address", qname: "App.10-0-0-1.EXAMPLE.test.", want: "{q} 86400 IN A 10.0.0.1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+" is answered with records owned in the case asked", func(t *testing.T) {

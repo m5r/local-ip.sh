@@ -9,8 +9,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-// recordTTL is the TTL of every record the server builds from its configuration and of the address a name carries.
-const recordTTL uint32 = 300
+// addressTTL is the TTL of the address a name carries: the answer follows from the name alone, and only a delegation added later at or above the name can change it.
+const addressTTL uint32 = 86400
+
+// recordTTL is the TTL of every record the server builds from its configuration, and the SOA's MINIMUM field, so that a negative answer is kept as long: the operator changes the configuration and the zone file rarely and by hand, and publishes a new record that long before anything depends on it.
+const recordTTL uint32 = 3600
 
 // anyTTL is the TTL of the HINFO record that answers a query for ANY: RFC 8482 section 4.2 asks for one long enough to suppress frequent repeats.
 const anyTTL uint32 = 3600
@@ -66,7 +69,7 @@ func newZone(domain, email string, nameServers []netip.Addr, file *zoneFile) (*z
 		Refresh: 900,
 		Retry:   900,
 		Expire:  1800,
-		Minttl:  300,
+		Minttl:  recordTTL,
 	}
 	z.add(z.soa)
 	for i, addr := range nameServers {
@@ -170,7 +173,7 @@ func (z *zone) lookup(question dns.Question, name string) (kind lookupKind, answ
 func addressAnswer(question dns.Question, addr netip.Addr) (lookupKind, []dns.RR, []dns.RR) {
 	switch question.Qtype {
 	case dns.TypeA:
-		return lookupAnswer, []dns.RR{&dns.A{Hdr: header(question.Name, dns.TypeA, recordTTL), A: addr.AsSlice()}}, nil
+		return lookupAnswer, []dns.RR{&dns.A{Hdr: header(question.Name, dns.TypeA, addressTTL), A: addr.AsSlice()}}, nil
 	case dns.TypeANY:
 		return lookupAnswer, []dns.RR{anyAnswer(question.Name, anyTTL)}, nil
 	}

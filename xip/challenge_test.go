@@ -195,7 +195,7 @@ func TestChallengeRecords(t *testing.T) {
 	// The negative answer is the zone's NODATA, whose SOA record is owned by the apex, not by the question name.
 	t.Run("TXT names without records get the zone's NODATA", func(t *testing.T) {
 		for _, qname := range []string{"local-ip.sh.", "nope.local-ip.sh."} {
-			expectNoData(t, queryTestServer(t, address, qname, dns.TypeTXT), challengeTestDomain+".", 300)
+			expectNoData(t, queryTestServer(t, address, qname, dns.TypeTXT), challengeTestDomain+".", 3600)
 		}
 	})
 

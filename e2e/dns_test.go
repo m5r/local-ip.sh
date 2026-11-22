@@ -766,6 +766,40 @@ func rdataFields(rr dns.RR) (string, error) {
 	return "", fmt.Errorf("record %q has a type the suite cannot compare", rr)
 }
 
+// The TTLs the server gives the records it builds: addressTTL to the address a name carries, recordTTL to the records built from its configuration, the SOA record among them, and to the SOA's MINIMUM field.
+const (
+	addressTTL uint32 = 86400
+	recordTTL  uint32 = 3600
+)
+
+// checkTTL requires an answer from a name server and holds every answer record to the TTL given: a name server gives each record the TTL it holds, where a resolver would count it down.
+func checkTTL(ttl uint32, resp *dns.Msg) error {
+	if len(resp.Answer) == 0 {
+		return fmt.Errorf("answer section is empty, want records with TTL %d", ttl)
+	}
+	for _, rr := range resp.Answer {
+		if got := rr.Header().Ttl; got != ttl {
+			return fmt.Errorf("answer record %q has TTL %d, want %d", rr, got, ttl)
+		}
+	}
+	return nil
+}
+
+// checkSOAMinimum checks the MINIMUM field of the one SOA record that answers the zone's SOA question, which bounds the TTL of every negative answer.
+func checkSOAMinimum(minimum uint32, resp *dns.Msg) error {
+	if len(resp.Answer) != 1 {
+		return fmt.Errorf("answer section has %d records, want exactly one SOA record", len(resp.Answer))
+	}
+	soa, ok := resp.Answer[0].(*dns.SOA)
+	if !ok {
+		return fmt.Errorf("answer record %q is not an SOA record", resp.Answer[0])
+	}
+	if soa.Minttl != minimum {
+		return fmt.Errorf("SOA MINIMUM = %d, want %d", soa.Minttl, minimum)
+	}
+	return nil
+}
+
 // checkHINFO checks the reply of RFC 8482 to a query for ANY at a name that owns records.
 func checkHINFO(resp *dns.Msg) error {
 	if len(resp.Question) != 1 {
@@ -825,6 +859,14 @@ func expectCachedRecordSet(set targetRecordSet) func(*testing.T, *dns.Msg) {
 
 func expectPartOfRecordSet(set targetRecordSet) func(*testing.T, *dns.Msg) {
 	return asCheck(func(resp *dns.Msg) error { return checkPartOfRecordSet(set, resp) })
+}
+
+func expectTTL(ttl uint32) func(*testing.T, *dns.Msg) {
+	return asCheck(func(resp *dns.Msg) error { return checkTTL(ttl, resp) })
+}
+
+func expectSOAMinimum(minimum uint32) func(*testing.T, *dns.Msg) {
+	return asCheck(func(resp *dns.Msg) error { return checkSOAMinimum(minimum, resp) })
 }
 
 var (
@@ -922,6 +964,19 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		dnsCase{name: "apex SOA", qname: zone, qtype: dns.TypeSOA, rcodes: noError, authoritative: true, check: expectApexSOA(tg)},
 		dnsCase{name: "CD flag", qname: zone, qtype: dns.TypeSOA, checkingDisabled: true, rcodes: noError, authoritative: true, check: expectApexSOA(tg)},
 		dnsCase{name: "dashed AAAA", qname: "10-11-12-13." + zone, qtype: dns.TypeAAAA, rcodes: noError, authoritative: true, check: noData},
+	)
+	// The TTLs have cases of their own, which requireZoneSOA does not check, so that a server that gives other TTLs fails these cases alone and every other case still runs.
+	cases = append(cases,
+		dnsCase{name: "dashed TTL", qname: "10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectTTL(addressTTL)},
+		dnsCase{name: "apex A TTL", qname: zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)},
+	)
+	for i, host := range hosts {
+		cases = append(cases, dnsCase{name: fmt.Sprintf("ns%d A TTL", i+1), qname: host, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)})
+	}
+	cases = append(cases,
+		dnsCase{name: "apex NS TTL", qname: zone, qtype: dns.TypeNS, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)},
+		dnsCase{name: "apex SOA TTL", qname: zone, qtype: dns.TypeSOA, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)},
+		dnsCase{name: "apex SOA MINIMUM", qname: zone, qtype: dns.TypeSOA, rcodes: noError, authoritative: true, check: expectSOAMinimum(recordTTL)},
 	)
 	for _, qtype := range []uint16{dns.TypeTXT, dns.TypeMX, dns.TypeCAA, dns.TypeHTTPS, dns.TypeDS, dns.TypeDNSKEY} {
 		cases = append(cases, dnsCase{name: "dashed " + dns.Type(qtype).String(), qname: "10-11-12-13." + zone, qtype: qtype, rcodes: noError, authoritative: true, check: noData})
@@ -2081,6 +2136,48 @@ func TestCheckHINFO(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := testReply(t, qname, dns.TypeANY, dns.RcodeSuccess, tt.answer, tt.authority, tt.additional)
 			assertCheck(t, checkHINFO(resp), tt.ok)
+		})
+	}
+}
+
+func TestCheckTTL(t *testing.T) {
+	const qname = "10-11-12-13.example.test."
+	tests := []struct {
+		name   string
+		answer []string
+		ok     bool
+	}{
+		{name: "accepts the TTL", answer: []string{qname + " 86400 IN A 10.11.12.13"}, ok: true},
+		{name: "rejects a smaller TTL", answer: []string{qname + " 86399 IN A 10.11.12.13"}},
+		{name: "rejects a larger TTL", answer: []string{qname + " 86401 IN A 10.11.12.13"}},
+		{name: "rejects one record of two with another TTL", answer: []string{qname + " 86400 IN A 10.11.12.13", qname + " 300 IN A 10.11.12.14"}},
+		{name: "rejects an empty answer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, qname, dns.TypeA, dns.RcodeSuccess, tt.answer, nil, nil)
+			assertCheck(t, checkTTL(86400, resp), tt.ok)
+		})
+	}
+}
+
+func TestCheckSOAMinimum(t *testing.T) {
+	const soa = "example.test. 3600 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 "
+	tests := []struct {
+		name   string
+		answer []string
+		ok     bool
+	}{
+		{name: "accepts the MINIMUM", answer: []string{soa + "3600"}, ok: true},
+		{name: "rejects another MINIMUM", answer: []string{soa + "300"}},
+		{name: "rejects an empty answer"},
+		{name: "rejects two SOA records", answer: []string{soa + "3600", soa + "3600"}},
+		{name: "rejects a record of another type", answer: []string{"example.test. 3600 IN NS ns1.example.test."}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := testReply(t, "example.test.", dns.TypeSOA, dns.RcodeSuccess, tt.answer, nil, nil)
+			assertCheck(t, checkSOAMinimum(3600, resp), tt.ok)
 		})
 	}
 }

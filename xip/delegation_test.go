@@ -55,7 +55,7 @@ func expectReferral(t *testing.T, resp *dns.Msg) {
 // expectNoDataAtExampleTest checks the NODATA form of a negative answer for the zone example.test, the answer a DS query at a cut gets: the parent side of a cut answers for DS, and this zone has no DS records.
 func expectNoDataAtExampleTest(t *testing.T, resp *dns.Msg) {
 	t.Helper()
-	expectNoData(t, resp, "example.test.", 300)
+	expectNoData(t, resp, "example.test.", 3600)
 }
 
 func expectDashedAnswer(t *testing.T, resp *dns.Msg) {

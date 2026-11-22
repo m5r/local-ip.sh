@@ -90,7 +90,7 @@ ns1.sub  A   192.0.2.1
 
 For any query at or below `sub.example.com`, whatever its type, the server answers with a referral instead of answering itself: no answer, the AA flag clear, the delegation's NS records in the authority section and the glue addresses in the additional section (a DS query for `sub.example.com` itself is still answered by this server, as DS records belong to the parent zone).
 
-A delegation takes every name at or below the label away from the server, including names that carry an address: with the zone file above, `10-0-0-1.sub.example.com` gets the referral, not `10.0.0.1`. Only delegate labels you have set aside for the purpose. On the hosted instance, labels directly below `local-ip.sh` that start with `xip-` are reserved for the project, and names under a reserved label are not part of the service.
+A delegation takes every name at or below the label away from the server, including names that carry an address: with the zone file above, `10-0-0-1.sub.example.com` gets the referral, not `10.0.0.1`. Such a name that a resolver asked for before the delegation was added can keep resolving to its address in that resolver's cache for up to a day, the TTL of the address a name carries. Only delegate labels you have set aside for the purpose. On the hosted instance, labels directly below `local-ip.sh` that start with `xip-` are reserved for the project, and names under a reserved label are not part of the service.
 
 ### Records
 
@@ -104,6 +104,8 @@ www   CNAME  site.example.net.
 ```
 
 The server answers by itself for the domain's SOA, NS and A records, for the addresses of its name servers, and for the address of every name that carries one. A query for another type at an alias such as `www` gets its CNAME record; any other name without the records asked for gets an empty answer with the domain's SOA record in the authority section, and never NXDOMAIN unless it is too long to have any name below it. A query for `ANY` at a name with records gets the HINFO record of RFC 8482 instead of the records, or the CNAME record at an alias. There are no zone transfers.
+
+The address a name carries has a TTL of one day. The records the server builds from its configuration, the domain's SOA, NS and A records and the addresses of its name servers, have a TTL of one hour, and so do its negative answers, through the MINIMUM field of the SOA record; records from the zone file keep their own TTL. Answers at `_acme-challenge`, negative ones included, have a TTL of 0, so that no resolver keeps a stale challenge. A resolver that asked for a name before a record was added there in the zone file, such as a new DKIM selector or a first CAA or MX record, can keep its empty answer for up to an hour, so publish a record an hour before anything depends on it. Changing the address of a name server also needs the glue records at the domain's registry changed and the old address kept answering while resolvers still use it: the delegation in the parent zone has its own TTL, so no hour is promised there.
 
 A [reference docker compose file](./compose.yml) is available for deployments using Docker.
 

@@ -135,7 +135,7 @@ func TestInstanceIsolation(t *testing.T) {
 	for i, instance := range instances {
 		t.Run(instance.domain+" answers for its own name server", func(t *testing.T) {
 			resp := queryTestServer(t, servers[i], "ns1."+instance.domain+".", dns.TypeA)
-			want := rrStrings(t, "ns1."+instance.domain+". 300 IN A "+instance.address)
+			want := rrStrings(t, "ns1."+instance.domain+". 3600 IN A "+instance.address)
 			if resp.Rcode != dns.RcodeSuccess || !slices.Equal(stringsOf(resp.Answer), want) {
 				t.Errorf("want NOERROR and %q, received:\n%s", want, resp)
 			}
@@ -332,7 +332,7 @@ func TestNewXipValidation(t *testing.T) {
 			t.Errorf("answer = %q, want ns1.example.com. A 192.0.2.10", resp.Answer[0])
 		}
 		ns := queryTestServer(t, address, "example.com.", dns.TypeNS)
-		want := rrStrings(t, "example.com. 300 IN NS ns1.example.com.")
+		want := rrStrings(t, "example.com. 3600 IN NS ns1.example.com.")
 		if !slices.Equal(stringsOf(ns.Answer), want) {
 			t.Errorf("NS answer = %q, want %q", stringsOf(ns.Answer), want)
 		}

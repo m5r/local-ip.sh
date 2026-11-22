@@ -45,7 +45,7 @@ const (
 	exampleDomain = "example.test"
 	exampleApex   = "example.test."
 	exampleEmail  = "admin@example.test"
-	exampleSOA    = "example.test. 300 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 300"
+	exampleSOA    = "example.test. 3600 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 3600"
 )
 
 var exampleNameServers = []string{"192.0.2.10", "192.0.2.11"}
@@ -258,19 +258,19 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		authority:  []string{"sub.example.test. 300 IN NS ns1.sub.example.test.", "sub.example.test. 300 IN NS ns.other.test."},
 		additional: []string{"ns1.sub.example.test. 300 IN A 192.0.2.1"},
 	}
-	challengeNoData := answerWant{rcode: dns.RcodeSuccess, aa: true, authority: []string{"example.test. 0 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 300"}}
+	challengeNoData := answerWant{rcode: dns.RcodeSuccess, aa: true, authority: []string{"example.test. 0 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 3600"}}
 	look := func(name string, want answerWant, requests ...*dns.Msg) answerRow {
 		return answerRow{name: name, exchanges: exchanges(want, requests...), lookup: true}
 	}
 
 	return []answerRow{
-		look("example.test. SOA", positive("{q} 300 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 300"), ask(exampleApex, dns.TypeSOA)),
+		look("example.test. SOA", positive("{q} 3600 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 3600"), ask(exampleApex, dns.TypeSOA)),
 		look("example.test. NS", answerWant{
 			rcode: dns.RcodeSuccess, aa: true,
-			answer:     []string{"{q} 300 IN NS ns1.example.test.", "{q} 300 IN NS ns2.example.test."},
-			additional: []string{"ns1.example.test. 300 IN A 192.0.2.10", "ns2.example.test. 300 IN A 192.0.2.11"},
+			answer:     []string{"{q} 3600 IN NS ns1.example.test.", "{q} 3600 IN NS ns2.example.test."},
+			additional: []string{"ns1.example.test. 3600 IN A 192.0.2.10", "ns2.example.test. 3600 IN A 192.0.2.11"},
 		}, ask(exampleApex, dns.TypeNS)),
-		look("example.test. A", positive("{q} 300 IN A 192.0.2.10", "{q} 300 IN A 192.0.2.11"), ask(exampleApex, dns.TypeA)),
+		look("example.test. A", positive("{q} 3600 IN A 192.0.2.10", "{q} 3600 IN A 192.0.2.11"), ask(exampleApex, dns.TypeA)),
 		look("example.test. TXT", positive(`{q} 300 IN TXT "v=spf1 -all"`), ask(exampleApex, dns.TypeTXT)),
 		look("example.test. MX", positive("{q} 300 IN MX 10 mail.other.test.", "{q} 300 IN MX 20 www.example.test."), ask(exampleApex, dns.TypeMX)),
 		look("example.test. AAAA", positive("{q} 300 IN AAAA 2001:db8::1"), ask(exampleApex, dns.TypeAAAA)),
@@ -281,7 +281,7 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		look("www.example.test. ANY, a name with records from the zone file, is the HINFO record", hinfo, ask("www.example.test.", dns.TypeANY)),
 		look("ns1.example.test. ANY, a name with a built-in record, is the HINFO record", hinfo, ask("ns1.example.test.", dns.TypeANY)),
 		look("EXAMPLE.Test. TXT is owned by the name as asked", positive(`EXAMPLE.Test. 300 IN TXT "v=spf1 -all"`), ask("EXAMPLE.Test.", dns.TypeTXT)),
-		look("ns1.example.test. A", positive("{q} 300 IN A 192.0.2.10"), ask("ns1.example.test.", dns.TypeA)),
+		look("ns1.example.test. A", positive("{q} 3600 IN A 192.0.2.10"), ask("ns1.example.test.", dns.TypeA)),
 		look("ns1.example.test. AAAA has no data", noData, ask("ns1.example.test.", dns.TypeAAAA)),
 		look("www.example.test. A", positive("{q} 300 IN A 192.0.2.80"), ask("www.example.test.", dns.TypeA)),
 		look("www.example.test. TXT has no data", noData, ask("www.example.test.", dns.TypeTXT)),
@@ -306,12 +306,12 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		look(`1\.2\.3\.4.example.test. A, one label that holds an address, has no data`, noData, ask(`1\.2\.3\.4.example.test.`, dns.TypeA)),
 		look("empty non-terminals have no data", noData,
 			ask("_tcp.example.test.", dns.TypeA), ask("er.name.example.test.", dns.TypeTXT), ask("name.example.test.", dns.TypeANY)),
-		look("names that carry an address have its A record", positive("{q} 300 IN A 10.0.0.1"),
+		look("names that carry an address have its A record", positive("{q} 86400 IN A 10.0.0.1"),
 			asks([]string{"10-0-0-1.example.test.", "app.10.0.0.1.example.test.", "10.0.0.1.app.example.test."}, dns.TypeA)...),
 		look("a name that carries an address has no data of other types", noData,
 			asks([]string{"10-0-0-1.example.test."}, dns.TypeAAAA, dns.TypeTXT, dns.TypeMX, dns.TypeNS, dns.TypeSOA, dns.TypeCNAME, dns.TypeCAA, dns.TypeDS, dns.TypeHTTPS)...),
 		look("10-0-0-1.example.test. ANY is the HINFO record", hinfo, ask("10-0-0-1.example.test.", dns.TypeANY)),
-		look("aPp-10-0-0-1.Example.TEST. A, an address after a name in its label, is owned by the name as asked", positive("{q} 300 IN A 10.0.0.1"), ask("aPp-10-0-0-1.Example.TEST.", dns.TypeA)),
+		look("aPp-10-0-0-1.Example.TEST. A, an address after a name in its label, is owned by the name as asked", positive("{q} 86400 IN A 10.0.0.1"), ask("aPp-10-0-0-1.Example.TEST.", dns.TypeA)),
 		look("app-10-0-0-1.example.test. AAAA has no data", noData, ask("app-10-0-0-1.example.test.", dns.TypeAAAA)),
 		look("app-10-0-0-1.example.test. ANY is the HINFO record", hinfo, ask("app-10-0-0-1.example.test.", dns.TypeANY)),
 		look("parents of a dotted name have no data", noData,
@@ -319,9 +319,9 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		look("nope.example.test. has no data", noData, asks([]string{"nope.example.test."}, dns.TypeA, dns.TypeTXT, dns.TypeNS, dns.TypeANY)...),
 		look("a name of 253 octets that owns nothing has no data", noData, asks([]string{name253}, dns.TypeA, dns.TypeNS)...),
 		look("names of 254 and 255 octets that own nothing do not exist", noName, asks([]string{name254, name255}, dns.TypeA, dns.TypeTXT, dns.TypeANY)...),
-		look("a name of 255 octets that carries an address has its A record", positive("{q} 300 IN A 10.0.0.1"), ask(address255, dns.TypeA)),
+		look("a name of 255 octets that carries an address has its A record", positive("{q} 86400 IN A 10.0.0.1"), ask(address255, dns.TypeA)),
 		look("a name of 255 octets that carries an address has no AAAA record", noData, ask(address255, dns.TypeAAAA)),
-		look("names of 254 and 255 octets whose first label carries an address after a name have its A record", positive("{q} 300 IN A 10.0.0.1"), asks([]string{newForm254, newForm255}, dns.TypeA)...),
+		look("names of 254 and 255 octets whose first label carries an address after a name have its A record", positive("{q} 86400 IN A 10.0.0.1"), asks([]string{newForm254, newForm255}, dns.TypeA)...),
 		look("names of 254 and 255 octets whose first label carries an address after a name have no AAAA record", noData, asks([]string{newForm254, newForm255}, dns.TypeAAAA)...),
 		look("names of 254 and 255 octets whose first label carries an address after a name have the HINFO record for ANY", hinfo, asks([]string{newForm254, newForm255}, dns.TypeANY)...),
 		{name: "a name of 255 octets that owns a TXT record has it", exchanges: exchanges(positive(`{q} 300 IN TXT "long"`), ask(name255, dns.TypeTXT)), lookup: true, longZone: true},
@@ -426,7 +426,7 @@ func TestLookupExistenceAtTheLengthLimit(t *testing.T) {
 		{name: "a name of 255 octets with an escaped dot in a label does not exist", qname: nameOfWireLength(t, 255, `a\.b.`+exampleApex), qtype: dns.TypeA, want: lookupNoName},
 		{name: "a name of 253 octets with a decimal escape exists", qname: nameOfWireLength(t, 253, `\200\201\202.`+exampleApex), qtype: dns.TypeA, want: lookupNoData},
 		{name: "a name of 254 octets with a decimal escape does not exist", qname: nameOfWireLength(t, 254, `\200\201\202.`+exampleApex), qtype: dns.TypeA, want: lookupNoName},
-		{name: "a name of 255 octets that carries an address exists", qname: nameOfWireLength(t, 255, "10-0-0-1."+exampleApex), qtype: dns.TypeA, want: lookupAnswer, answer: []string{"{q} 300 IN A 10.0.0.1"}},
+		{name: "a name of 255 octets that carries an address exists", qname: nameOfWireLength(t, 255, "10-0-0-1."+exampleApex), qtype: dns.TypeA, want: lookupAnswer, answer: []string{"{q} 86400 IN A 10.0.0.1"}},
 		{name: "a name of 255 octets that owns a zone file record exists", qname: nameOfWireLength(t, 255, exampleApex), qtype: dns.TypeTXT, want: lookupAnswer, answer: []string{`{q} 300 IN TXT "long"`}},
 	}
 	for _, tt := range tests {
@@ -457,15 +457,15 @@ func TestSOARecordFields(t *testing.T) {
 	}{
 		{"owner", soa.Hdr.Name, "example.test."},
 		{"class", soa.Hdr.Class, uint16(dns.ClassINET)},
-		{"TTL", soa.Hdr.Ttl, uint32(300)},
+		{"TTL", soa.Hdr.Ttl, uint32(3600)},
 		{"MNAME", soa.Ns, "ns1.example.test."},
 		{"RNAME, lower-cased with the dot of the local part escaped", soa.Mbox, `admin\.team.example.test.`},
 		{"serial", soa.Serial, uint32(2024072600)},
 		{"refresh", soa.Refresh, uint32(900)},
 		{"retry", soa.Retry, uint32(900)},
 		{"expire", soa.Expire, uint32(1800)},
-		{"minimum", soa.Minttl, uint32(300)},
-		{"TTL of a negative answer", z.negativeTTL(), uint32(300)},
+		{"minimum", soa.Minttl, uint32(3600)},
+		{"TTL of a negative answer", z.negativeTTL(), uint32(3600)},
 	}
 	for _, field := range fields {
 		t.Run(field.name, func(t *testing.T) {
