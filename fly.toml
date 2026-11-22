@@ -71,11 +71,14 @@ grace_period = "10s"
 interval = "15s"
 timeout = "2s"
 
-# One size above the usual shared-cpu-1x / 256 MB: on 2026-11-20 the service needed about 8% of a
-# vCPU against that size's 6.25% allowance and was throttled into slow and lost DNS answers.
-# Go back down once the CPU cost per query has been fixed and verified here.
+# The smallest size, and the only one the account's free machine allowance covers. It may use
+# 6.25% of a vCPU on average; on 2026-11-22 the service needed about 5% at about 110 queries per
+# second, measured on a larger size. A burst of queries above that draws on the machine's burst
+# balance, and once the balance is empty the machine is throttled and DNS answers get slow or lost
+# until the burst ends: fly_instance_cpu_throttle and fly_instance_cpu_balance in Fly's metrics
+# show it. Memory is not the limit: the server process holds under 20 MB.
 [[vm]]
-size = "shared-cpu-2x"
+size = "shared-cpu-1x"
 cpu_kind = "shared"
-cpus = 2
-memory_mb = 512
+cpus = 1
+memory_mb = 256
