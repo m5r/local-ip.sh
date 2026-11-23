@@ -25,6 +25,13 @@ func TestCheckConfig(t *testing.T) {
 	if err != nil || again.Domain != checked.Domain || again.ValidationDelay != checked.ValidationDelay {
 		t.Errorf("checkConfig of its own result = %+v, %v", again, err)
 	}
+	for _, email := range []string{"", "admin@example.com"} {
+		withEmail := valid()
+		withEmail.Email = email
+		if checked, err := checkConfig(withEmail); err != nil || checked.Email != email {
+			t.Errorf("the email %q became %q, %v", email, checked.Email, err)
+		}
+	}
 	custom := valid()
 	custom.ValidationDelay = time.Millisecond
 	if checked, err := checkConfig(custom); err != nil || checked.ValidationDelay != time.Millisecond {
@@ -43,6 +50,9 @@ func TestCheckConfig(t *testing.T) {
 		{"no state directory", func(c *Config) { c.StateDir = "" }, "no state directory"},
 		{"no records", func(c *Config) { c.Records = nil }, "no challenge records"},
 		{"negative delay", func(c *Config) { c.ValidationDelay = -time.Second }, "negative"},
+		{"email that is not an address", func(c *Config) { c.Email = "admin" }, `email "admin" is not a bare address`},
+		{"email with a display name", func(c *Config) { c.Email = "Admin <admin@example.com>" }, `email "Admin <admin@example.com>" is not a bare address`},
+		{"email in angle brackets", func(c *Config) { c.Email = "<admin@example.com>" }, `email "<admin@example.com>" is not a bare address`},
 	} {
 		cfg := valid()
 		tc.change(&cfg)

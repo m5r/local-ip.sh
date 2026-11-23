@@ -148,19 +148,19 @@ func publicKeyEqual(a, b *x509.Certificate) bool {
 func lifecycle(t *testing.T, r rig, tg *target) {
 	ctx := t.Context()
 
-	logStep(t, "step 1: baseline through port 443 of every nameserver")
+	logStep(t, "step 1: baseline through port 443 of every address of the website")
 	var baseline observation
-	for i, ns := range tg.nameServers {
-		obs, err := observe(ctx, tg, netip.AddrPortFrom(ns, 443))
+	for i, addr := range tg.webAddresses {
+		obs, err := observe(ctx, tg, netip.AddrPortFrom(addr, 443))
 		if err != nil {
-			t.Fatalf("baseline through %s: %v", ns, err)
+			t.Fatalf("baseline through %s: %v", addr, err)
 		}
 		if i == 0 {
 			baseline = obs
 			continue
 		}
 		if obs.site.SerialNumber.Cmp(baseline.site.SerialNumber) != 0 || obs.pair.leaf().SerialNumber.Cmp(baseline.pair.leaf().SerialNumber) != 0 {
-			t.Fatalf("%s serves website serial %s and wildcard serial %s, %s serves %s and %s", ns, obs.site.SerialNumber, obs.pair.leaf().SerialNumber, tg.nameServers[0], baseline.site.SerialNumber, baseline.pair.leaf().SerialNumber)
+			t.Fatalf("%s serves website serial %s and wildcard serial %s, %s serves %s and %s", addr, obs.site.SerialNumber, obs.pair.leaf().SerialNumber, tg.webAddresses[0], baseline.site.SerialNumber, baseline.pair.leaf().SerialNumber)
 		}
 	}
 	baselineContainer, err := r.serverState(ctx)
@@ -169,22 +169,22 @@ func lifecycle(t *testing.T, r rig, tg *target) {
 	}
 	logStep(t, "baseline: website serial %s, wildcard serial %s, container %s started at %s", baseline.site.SerialNumber, baseline.pair.leaf().SerialNumber, baselineContainer.id, baselineContainer.startedAt.Format(time.RFC3339Nano))
 
-	logStep(t, "step 2: starting one prober per nameserver, and one of the challenge name")
+	logStep(t, "step 2: starting one prober per name server address, and one of the challenge name")
 	probeName := "10-0-0-1." + tg.domain
 	probeWant := netip.MustParseAddr("10.0.0.1")
-	stops := make([]func() ([]probe, time.Time), len(tg.nameServers))
-	for i, ns := range tg.nameServers {
+	stops := make([]func() ([]probe, time.Time), len(tg.dnsServers))
+	for i, ns := range tg.dnsServers {
 		stops[i] = startProber(t, netip.AddrPortFrom(ns, 53), probeName, dns.TypeA, answersAddress(probeWant))
 	}
 	challengeName := "_acme-challenge." + tg.domain
-	stopChallengeProber := startProber(t, netip.AddrPortFrom(tg.nameServers[0], 53), challengeName, dns.TypeTXT, answersTXT)
+	stopChallengeProber := startProber(t, netip.AddrPortFrom(tg.dnsServers[0], 53), challengeName, dns.TypeTXT, answersTXT)
 
 	logStep(t, "step 3: sending SIGUSR1 to the server")
 	if _, err := r.compose(ctx, dockerCommandTimeout, "kill", "--signal", "SIGUSR1", rigServer); err != nil {
 		t.Fatalf("signalling the server: %v", err)
 	}
 
-	logStep(t, "step 4: polling through %s until both certificates are renewed", tg.nameServers[0])
+	logStep(t, "step 4: polling through %s until both certificates are renewed", tg.webAddresses[0])
 	renewed := pollRenewal(t, tg, baseline)
 	logStep(t, "renewed: website serial %s, wildcard serial %s", renewed.site.SerialNumber, renewed.pair.leaf().SerialNumber)
 	for _, c := range []struct {
@@ -203,7 +203,7 @@ func lifecycle(t *testing.T, r rig, tg *target) {
 	}
 
 	logStep(t, "step 5: stopping the probers and reading the container's state")
-	for i, ns := range tg.nameServers {
+	for i, ns := range tg.dnsServers {
 		probes, end := stops[i]()
 		silence := longestSilence(probes, end)
 		logStep(t, "prober %s: %d probes, %d unanswered, longest silence %s", ns, len(probes), unansweredProbes(probes), silence)
@@ -227,7 +227,7 @@ func lifecycle(t *testing.T, r rig, tg *target) {
 	}
 
 	logStep(t, "step 6: restarting the server")
-	stopRestartProber := startProber(t, netip.AddrPortFrom(tg.nameServers[0], 53), probeName, dns.TypeA, answersAddress(probeWant))
+	stopRestartProber := startProber(t, netip.AddrPortFrom(tg.dnsServers[0], 53), probeName, dns.TypeA, answersAddress(probeWant))
 	if _, err := r.compose(ctx, dockerCommandTimeout, "restart", rigServer); err != nil {
 		t.Fatalf("restarting the server: %v", err)
 	}
@@ -238,18 +238,18 @@ func lifecycle(t *testing.T, r rig, tg *target) {
 	if err := checkRestartedInPlace(afterRenewal, afterRestart); err != nil {
 		t.Fatalf("after the restart: %v", err)
 	}
-	logStep(t, "container %s started again at %s; polling through %s until it serves both certificates", afterRestart.id, afterRestart.startedAt.Format(time.RFC3339Nano), tg.nameServers[0])
+	logStep(t, "container %s started again at %s; polling through %s until it serves both certificates", afterRestart.id, afterRestart.startedAt.Format(time.RFC3339Nano), tg.webAddresses[0])
 	restarted := pollObserve(t, tg)
 	if restarted.site.SerialNumber.Cmp(renewed.site.SerialNumber) != 0 || restarted.pair.leaf().SerialNumber.Cmp(renewed.pair.leaf().SerialNumber) != 0 {
 		t.Errorf("after the restart the website serial is %s and the wildcard serial %s, want the stored %s and %s", restarted.site.SerialNumber, restarted.pair.leaf().SerialNumber, renewed.site.SerialNumber, renewed.pair.leaf().SerialNumber)
 	}
 	probes, end := stopRestartProber()
-	logStep(t, "restart outage through %s: %d probes, %d unanswered, longest silence %s (reported, not judged)", tg.nameServers[0], len(probes), unansweredProbes(probes), longestSilence(probes, end))
+	logStep(t, "restart outage through %s: %d probes, %d unanswered, longest silence %s (reported, not judged)", tg.dnsServers[0], len(probes), unansweredProbes(probes), longestSilence(probes, end))
 }
 
 func pollRenewal(t *testing.T, tg *target, baseline observation) observation {
 	t.Helper()
-	endpoint := netip.AddrPortFrom(tg.nameServers[0], 443)
+	endpoint := netip.AddrPortFrom(tg.webAddresses[0], 443)
 	deadline := time.Now().Add(renewalPollLimit)
 	for {
 		obs, err := observe(t.Context(), tg, endpoint)
@@ -272,7 +272,7 @@ func pollRenewal(t *testing.T, tg *target, baseline observation) observation {
 
 func pollObserve(t *testing.T, tg *target) observation {
 	t.Helper()
-	endpoint := netip.AddrPortFrom(tg.nameServers[0], 443)
+	endpoint := netip.AddrPortFrom(tg.webAddresses[0], 443)
 	deadline := time.Now().Add(restartPollLimit)
 	for {
 		obs, err := observe(t.Context(), tg, endpoint)

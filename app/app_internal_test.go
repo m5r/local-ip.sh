@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,11 +13,22 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// WriteTestZone writes a zone file with the records every zone needs and returns its path. It is exported for the tests of package app_test.
+func WriteTestZone(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.zone")
+	content := "@ 3600 SOA ns1 admin 1 900 900 1800 3600\n@ 3600 NS ns1\nns1 3600 A 192.0.2.53\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRunEndsWhenDNSStops(t *testing.T) {
 	a, err := New(Config{
 		Domain:        "app.test",
+		ZoneFile:      WriteTestZone(t),
 		Email:         "admin@app.test",
-		NameServers:   []string{"192.0.2.53"},
 		DNSUDPAddress: "127.0.0.1:0",
 		DNSTCPAddress: "127.0.0.1:0",
 		HTTPAddress:   "127.0.0.1:0",

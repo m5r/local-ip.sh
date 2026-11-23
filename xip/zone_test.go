@@ -12,8 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// exampleZoneFile is the zone file of the example zone the answer tables use.
-// The record with its own TTL comes last because, without a $TTL directive, a TTL written on a record becomes the default of every record after it (RFC 1035 section 5.1).
+// exampleZoneFile is what the zone file of the example zone the answer tables use declares after testZoneHead.
 const exampleZoneFile = `@               TXT    "v=spf1 -all"
 @               MX     10 mail.other.test.
 @               MX     20 www
@@ -44,37 +43,27 @@ short        60 TXT    "short-lived"
 const (
 	exampleDomain = "example.test"
 	exampleApex   = "example.test."
-	exampleEmail  = "admin@example.test"
 	exampleSOA    = "example.test. 3600 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 3600"
 )
 
-var exampleNameServers = []string{"192.0.2.10", "192.0.2.11"}
-
-func exampleAddresses() []netip.Addr {
-	addresses := make([]netip.Addr, len(exampleNameServers))
-	for i, ns := range exampleNameServers {
-		addresses[i] = netip.MustParseAddr(ns)
-	}
-	return addresses
-}
-
-// newExampleZone builds the example zone for domain example.test from a zone file, without NewXip and without a socket.
+// newExampleZone builds the example zone for domain example.test from testZoneHead followed by zoneFileContent, without NewXip and without a socket.
 func newExampleZone(t *testing.T, zoneFileContent string) *zone {
 	t.Helper()
-	file, err := parseZoneFile(strings.NewReader(zoneFileContent), testZoneFileName, zoneServer{
-		origin:        exampleDomain,
-		nameServers:   nameServerNames(exampleApex, len(exampleNameServers)),
-		challengeName: challengeLabel + exampleApex,
-		addresses:     exampleAddresses(),
-	})
+	file, err := parseTestZone(zoneFileContent)
 	if err != nil {
 		t.Fatalf("parseZoneFile: %v", err)
 	}
-	z, err := newZone(exampleDomain, exampleEmail, exampleAddresses(), file)
+	return newZone(file)
+}
+
+// newZoneOf builds a zone from a whole zone file for domain example.test, without testZoneHead.
+func newZoneOf(t *testing.T, content string) *zone {
+	t.Helper()
+	file, err := parseZoneFile(strings.NewReader(content), testZoneFileName, testServer)
 	if err != nil {
-		t.Fatalf("newZone: %v", err)
+		t.Fatalf("parseZoneFile: %v", err)
 	}
-	return z
+	return newZone(file)
 }
 
 // nameOfWireLength puts labels of x in front of suffix until the name is exactly octets long in wire format.
@@ -268,7 +257,7 @@ func exampleZoneRows(t *testing.T) []answerRow {
 		look("example.test. NS", answerWant{
 			rcode: dns.RcodeSuccess, aa: true,
 			answer:     []string{"{q} 3600 IN NS ns1.example.test.", "{q} 3600 IN NS ns2.example.test."},
-			additional: []string{"ns1.example.test. 3600 IN A 192.0.2.10", "ns2.example.test. 3600 IN A 192.0.2.11"},
+			additional: []string{"ns1.example.test. 3600 IN A 192.0.2.10", "ns2.example.test. 3600 IN A 192.0.2.11", "ns2.example.test. 3600 IN AAAA 2001:db8:ffff::11"},
 		}, ask(exampleApex, dns.TypeNS)),
 		look("example.test. A", positive("{q} 3600 IN A 192.0.2.10", "{q} 3600 IN A 192.0.2.11"), ask(exampleApex, dns.TypeA)),
 		look("example.test. TXT", positive(`{q} 300 IN TXT "v=spf1 -all"`), ask(exampleApex, dns.TypeTXT)),
@@ -279,10 +268,11 @@ func exampleZoneRows(t *testing.T) []answerRow {
 			asks([]string{exampleApex}, dns.TypeDS, dns.TypeDNSKEY, dns.TypeSRV, dns.TypeHTTPS, 65280, dns.TypeOPT, dns.TypeTSIG, dns.TypeTKEY)...),
 		look("example.test. ANY is the HINFO record", hinfo, ask(exampleApex, dns.TypeANY)),
 		look("www.example.test. ANY, a name with records from the zone file, is the HINFO record", hinfo, ask("www.example.test.", dns.TypeANY)),
-		look("ns1.example.test. ANY, a name with a built-in record, is the HINFO record", hinfo, ask("ns1.example.test.", dns.TypeANY)),
+		look("ns1.example.test. ANY, a name server's name, is the HINFO record", hinfo, ask("ns1.example.test.", dns.TypeANY)),
 		look("EXAMPLE.Test. TXT is owned by the name as asked", positive(`EXAMPLE.Test. 300 IN TXT "v=spf1 -all"`), ask("EXAMPLE.Test.", dns.TypeTXT)),
 		look("ns1.example.test. A", positive("{q} 3600 IN A 192.0.2.10"), ask("ns1.example.test.", dns.TypeA)),
 		look("ns1.example.test. AAAA has no data", noData, ask("ns1.example.test.", dns.TypeAAAA)),
+		look("ns2.example.test. AAAA", positive("{q} 3600 IN AAAA 2001:db8:ffff::11"), ask("ns2.example.test.", dns.TypeAAAA)),
 		look("www.example.test. A", positive("{q} 300 IN A 192.0.2.80"), ask("www.example.test.", dns.TypeA)),
 		look("www.example.test. TXT has no data", noData, ask("www.example.test.", dns.TypeTXT)),
 		look("alias.example.test. of every type is the CNAME alone", aliasFor,
@@ -446,10 +436,7 @@ func TestLookupExistenceAtTheLengthLimit(t *testing.T) {
 }
 
 func TestSOARecordFields(t *testing.T) {
-	z, err := newZone("example.test", "Admin.Team@EXAMPLE.Test", []netip.Addr{netip.MustParseAddr("192.0.2.10")}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	z := newZoneOf(t, "@ 7200 SOA NS.Example.Test. Admin\\.Team.EXAMPLE.test. 4294967295 1 2 3 600\n@ NS ns.other.test.\n")
 	soa := z.soa
 	fields := []struct {
 		name      string
@@ -457,15 +444,14 @@ func TestSOARecordFields(t *testing.T) {
 	}{
 		{"owner", soa.Hdr.Name, "example.test."},
 		{"class", soa.Hdr.Class, uint16(dns.ClassINET)},
-		{"TTL", soa.Hdr.Ttl, uint32(3600)},
-		{"MNAME", soa.Ns, "ns1.example.test."},
-		{"RNAME, lower-cased with the dot of the local part escaped", soa.Mbox, `admin\.team.example.test.`},
-		{"serial", soa.Serial, uint32(2024072600)},
-		{"refresh", soa.Refresh, uint32(900)},
-		{"retry", soa.Retry, uint32(900)},
-		{"expire", soa.Expire, uint32(1800)},
-		{"minimum", soa.Minttl, uint32(3600)},
-		{"TTL of a negative answer", z.negativeTTL(), uint32(3600)},
+		{"TTL", soa.Hdr.Ttl, uint32(7200)},
+		{"MNAME, lower-cased", soa.Ns, "ns.example.test."},
+		{"RNAME, lower-cased with the escaped dot of its first label kept", soa.Mbox, `admin\.team.example.test.`},
+		{"serial", soa.Serial, uint32(4294967295)},
+		{"refresh", soa.Refresh, uint32(1)},
+		{"retry", soa.Retry, uint32(2)},
+		{"expire", soa.Expire, uint32(3)},
+		{"minimum", soa.Minttl, uint32(600)},
 	}
 	for _, field := range fields {
 		t.Run(field.name, func(t *testing.T) {
@@ -474,19 +460,86 @@ func TestSOARecordFields(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("the SOA answer is the record as written", func(t *testing.T) {
+		kind, answer, _ := z.lookup(dns.Question{Name: exampleApex, Qtype: dns.TypeSOA, Qclass: dns.ClassINET}, exampleApex)
+		want := rrStrings(t, `example.test. 7200 IN SOA ns.example.test. admin\.team.example.test. 4294967295 1 2 3 600`)
+		if kind != lookupAnswer || !slices.Equal(stringsOf(answer), want) {
+			t.Errorf("lookup = %d, %q, want %q", kind, stringsOf(answer), want)
+		}
+	})
 }
 
-// nameServerAnswerSizeOf packs the NS answer at apex independently of newZone: the apex in upper case as the question, n NS records and their addresses.
+// TestNegativeTTL shows that a negative answer carries the SOA record with the smaller of the TTL and the MINIMUM field the file gives it.
+func TestNegativeTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		soa  string
+		want uint32
+	}{
+		{name: "a MINIMUM field below the SOA record's TTL decides", soa: "@ 300 SOA ns.other.test. admin 1 900 900 1800 60\n", want: 60},
+		{name: "a TTL below the SOA record's MINIMUM field decides", soa: "@ 30 SOA ns.other.test. admin 1 900 900 1800 300\n", want: 30},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			z := newZoneOf(t, tt.soa+"@ NS ns.other.test.\n")
+			if got := z.negativeTTL(); got != tt.want {
+				t.Errorf("negativeTTL() = %d, want %d", got, tt.want)
+			}
+			authority := z.negativeAuthority(z.negativeTTL())
+			if len(authority) != 1 || authority[0].Header().Ttl != tt.want || authority[0].Header().Rrtype != dns.TypeSOA {
+				t.Errorf("negative authority = %q, want the SOA record with TTL %d", stringsOf(authority), tt.want)
+			}
+		})
+	}
+}
+
+// TestApexAddressesComeFromTheFile shows that the apex has the A and AAAA records the file gives it and no other.
+func TestApexAddressesComeFromTheFile(t *testing.T) {
+	z := newZoneOf(t, minimalSOA+"@ NS ns1\nns1 A 192.0.2.10\n@ 60 AAAA 2001:db8::1\n")
+	apex := func(qtype uint16) (lookupKind, []string) {
+		kind, answer, _ := z.lookup(dns.Question{Name: exampleApex, Qtype: qtype, Qclass: dns.ClassINET}, exampleApex)
+		return kind, stringsOf(answer)
+	}
+	if kind, answer := apex(dns.TypeA); kind != lookupNoData {
+		t.Errorf("A at the apex of a file without one = %d, %q, want no data", kind, answer)
+	}
+	if kind, answer := apex(dns.TypeAAAA); kind != lookupAnswer || !slices.Equal(answer, rrStrings(t, "example.test. 60 IN AAAA 2001:db8::1")) {
+		t.Errorf("AAAA at the apex = %d, %q, want the record of the file", kind, answer)
+	}
+}
+
+// TestApexNSRecordsAreNotACut shows that the names below the apex stay the zone's although the apex owns NS records.
+func TestApexNSRecordsAreNotACut(t *testing.T) {
+	z := newZoneOf(t, minimalSOA+"@ NS ns1\n@ NS ns.other.test.\nns1 A 192.0.2.10\nwww TXT \"x\"\n")
+	for _, name := range []string{exampleApex, "www.example.test.", "10-0-0-1.example.test."} {
+		if cut, _, ok := z.cuts.find(name); ok {
+			t.Errorf("%s is below the cut %s, want no cut", name, cut)
+		}
+	}
+	kind, answer, _ := z.lookup(dns.Question{Name: "www.example.test.", Qtype: dns.TypeTXT, Qclass: dns.ClassINET}, "www.example.test.")
+	if kind != lookupAnswer || !slices.Equal(stringsOf(answer), rrStrings(t, `www.example.test. 300 IN TXT "x"`)) {
+		t.Errorf("www.example.test. TXT = %d, %q, want the record of the file", kind, stringsOf(answer))
+	}
+	kind, answer, additional := z.lookup(dns.Question{Name: exampleApex, Qtype: dns.TypeNS, Qclass: dns.ClassINET}, exampleApex)
+	if kind != lookupAnswer || !slices.Equal(stringsOf(answer), rrStrings(t, "example.test. 300 IN NS ns1.example.test.", "example.test. 300 IN NS ns.other.test.")) {
+		t.Errorf("NS at the apex = %d, %q, want both records of the file", kind, stringsOf(answer))
+	}
+	if !slices.Equal(stringsOf(additional), rrStrings(t, "ns1.example.test. 300 IN A 192.0.2.10")) {
+		t.Errorf("additional = %q, want the address of the name server inside the zone", stringsOf(additional))
+	}
+}
+
+// nameServerAnswerSizeOf packs the NS answer at apex independently of the code under test: the apex in upper case as the question, n NS records and their addresses.
 func nameServerAnswerSizeOf(t *testing.T, apex string, n int) int {
 	t.Helper()
 	qname := strings.ToUpper(apex)
 	msg := new(dns.Msg)
 	msg.SetQuestion(qname, dns.TypeNS)
 	msg.Compress = true
-	addresses := addressesUpTo(n)
 	for i := range n {
 		msg.Answer = append(msg.Answer, mustRR(t, fmt.Sprintf("%s 300 IN NS ns%d.%s", qname, i+1, apex)))
-		msg.Extra = append(msg.Extra, mustRR(t, fmt.Sprintf("ns%d.%s 300 IN A %s", i+1, apex, addresses[i])))
+		msg.Extra = append(msg.Extra, mustRR(t, fmt.Sprintf("ns%d.%s 300 IN A %s", i+1, apex, nameServerAddress(i))))
 	}
 	packed, err := msg.Pack()
 	if err != nil {
@@ -495,127 +548,32 @@ func nameServerAnswerSizeOf(t *testing.T, apex string, n int) int {
 	return len(packed)
 }
 
-// addressesUpTo returns n different name server addresses.
-func addressesUpTo(n int) []netip.Addr {
-	addresses := make([]netip.Addr, n)
-	for i := range addresses {
-		addresses[i] = netip.AddrFrom4([4]byte{10, 0, byte((i + 1) >> 8), byte(i + 1)})
-	}
-	return addresses
+// nameServerAddress is the address of the i-th of many name servers, a different one for each.
+func nameServerAddress(i int) netip.Addr {
+	return netip.AddrFrom4([4]byte{10, 0, byte((i + 1) >> 8), byte(i + 1)})
 }
 
-// oversizedNameServerList is a number of name servers whose NS answer at example.test does not fit in a DNS message.
+// oversizedNameServerList is a number of name servers whose NS answer at example.test does not fit in a DNS message with their addresses, though it does without them.
 const oversizedNameServerList = 2000
 
-func TestNewZoneRefusals(t *testing.T) {
-	one := addressesUpTo(1)
-
-	t.Run("a zone without a name server is refused", func(t *testing.T) {
-		_, err := newZone(exampleDomain, exampleEmail, nil, nil)
-		if want := "xip: at least one name server is required"; err == nil || err.Error() != want {
-			t.Errorf("newZone error = %v, want %q", err, want)
-		}
-	})
-
-	t.Run("a local part of 64 octets cannot be the RNAME", func(t *testing.T) {
-		email := strings.Repeat("a", 64) + "@example.test"
-		_, err := newZone(exampleDomain, email, one, nil)
-		want := "xip: email " + email + " cannot be the RNAME of the SOA record: "
-		if err == nil || !strings.HasPrefix(err.Error(), want) {
-			t.Errorf("newZone error = %v, want one starting with %q", err, want)
-		}
-	})
-
-	t.Run("an RNAME of 257 octets whose labels each fit is refused", func(t *testing.T) {
-		domain := strings.Repeat("1", 63) + "." + strings.Repeat("2", 63) + "." + strings.Repeat("3", 63)
-		email := strings.Repeat("a", 63) + "@" + domain
-		if octets := 1 + 63 + wireLengthOf(t, domain+"."); octets != 257 {
-			t.Fatalf("the RNAME would be %d octets, want 257", octets)
-		}
-		_, err := newZone(domain, email, one, nil)
-		want := "xip: email " + email + " cannot be the RNAME of the SOA record: "
-		if err == nil || !strings.HasPrefix(err.Error(), want) {
-			t.Errorf("newZone error = %v, want one starting with %q", err, want)
-		}
-	})
-
-	t.Run("name servers whose NS answer does not fit in a DNS message are refused", func(t *testing.T) {
-		size := nameServerAnswerSizeOf(t, exampleApex, oversizedNameServerList)
-		if size <= maxReplyWithoutOPT {
-			t.Fatalf("%d name servers make an NS answer of %d octets, which fits: choose more", oversizedNameServerList, size)
-		}
-		_, err := newZone(exampleDomain, exampleEmail, addressesUpTo(oversizedNameServerList), nil)
-		want := fmt.Sprintf("xip: the answer for example.test. NS takes %d octets, more than the limit of 65524 octets for a DNS message; there are too many name servers for this domain", size)
-		if err == nil || err.Error() != want {
-			t.Errorf("newZone error = %v, want %q", err, want)
-		}
-	})
-}
-
-// TestNewXipStopsOnTheRefusalsOfB7 shows that a configuration newZone refuses stops NewXip, for every refusal that options NewXip accepts can reach.
-func TestNewXipStopsOnTheRefusalsOfB7(t *testing.T) {
-	longLocalPart := strings.Repeat("a", 64) + "@example.test"
-	_, rnameErr := canonicalName(emailToRname(longLocalPart))
-	if rnameErr == nil {
-		t.Fatal("a local part of 64 octets makes a valid RNAME: choose another email address")
+func TestApexNameServerAnswerSize(t *testing.T) {
+	var content strings.Builder
+	content.WriteString(minimalSOA)
+	for i := range oversizedNameServerList {
+		fmt.Fprintf(&content, "@ NS ns%d\nns%d A %s\n", i+1, i+1, nameServerAddress(i))
 	}
-	tooManyNameServers := make([]string, oversizedNameServerList)
-	for i, addr := range addressesUpTo(oversizedNameServerList) {
-		tooManyNameServers[i] = addr.String()
+	size := nameServerAnswerSizeOf(t, exampleApex, oversizedNameServerList)
+	if size <= maxReplyWithoutOPT {
+		t.Fatalf("%d name servers make an NS answer of %d octets, which fits: choose more", oversizedNameServerList, size)
 	}
-
-	tests := []struct {
-		name        string
-		domain      string
-		email       string
-		nameServers []string
-		want        string
-	}{
-		{
-			name:        "an email address whose RNAME is not a DNS name",
-			domain:      exampleDomain,
-			email:       longLocalPart,
-			nameServers: exampleNameServers,
-			want:        fmt.Sprintf("xip: email %s cannot be the RNAME of the SOA record: %v", longLocalPart, rnameErr),
-		},
-		{
-			name:        "name servers whose NS answer is over the limit",
-			domain:      exampleDomain,
-			email:       exampleEmail,
-			nameServers: tooManyNameServers,
-			want:        fmt.Sprintf("xip: the answer for example.test. NS takes %d octets, more than the limit of 65524 octets for a DNS message; there are too many name servers for this domain", nameServerAnswerSizeOf(t, exampleApex, oversizedNameServerList)),
-		},
+	path := writeZoneFile(t, content.String())
+	xip, err := NewXip(WithDomain(exampleDomain), WithZoneFile(path))
+	want := fmt.Sprintf("zone file %s: the answer for example.test. NS with the addresses of its name servers takes %d octets, more than the limit of 65524 octets for a DNS message", path, size)
+	if err == nil || err.Error() != want {
+		t.Errorf("NewXip error = %v, want %q", err, want)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name+" stops NewXip", func(t *testing.T) {
-			xip, err := NewXip(WithDomain(tt.domain), WithEmail(tt.email), WithNameServers(tt.nameServers))
-			if err == nil || err.Error() != tt.want {
-				t.Errorf("NewXip error = %v, want %q", err, tt.want)
-			}
-			if xip != nil {
-				t.Error("NewXip returned a server together with an error")
-			}
-		})
-	}
-}
-
-func TestNegativeTTL(t *testing.T) {
-	tests := []struct {
-		name    string
-		ttl     uint32
-		minimum uint32
-		want    uint32
-	}{
-		{name: "a MINIMUM field below the SOA record's TTL decides", ttl: 300, minimum: 60, want: 60},
-		{name: "a TTL below the SOA record's MINIMUM field decides", ttl: 30, minimum: 300, want: 30},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			z := &zone{soa: &dns.SOA{Hdr: header(exampleApex, dns.TypeSOA, tt.ttl), Minttl: tt.minimum}}
-			if got := z.negativeTTL(); got != tt.want {
-				t.Errorf("negativeTTL() = %d, want %d", got, tt.want)
-			}
-		})
+	if xip != nil {
+		t.Error("NewXip returned a server together with an error")
 	}
 }
 
@@ -628,7 +586,7 @@ func storedRecords(z *zone) []string {
 		}
 	}
 	for _, cut := range z.cuts.sortedCuts() {
-		records = append(records, stringsOf(z.cuts.cuts[cut].nameServers)...)
+		records = append(records, stringsOf(z.cuts.cuts[cut].nsRecords)...)
 		records = append(records, stringsOf(z.cuts.cuts[cut].glue)...)
 	}
 	return records

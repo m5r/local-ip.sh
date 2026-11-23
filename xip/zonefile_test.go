@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/miekg/dns"
+	"github.com/pelletier/go-toml/v2"
 )
 
 const (
@@ -20,14 +21,50 @@ const (
 
 var testServer = zoneServer{
 	origin:        testOrigin,
-	nameServers:   []string{"NS1.Example.Test.", "ns2.example.test"},
 	challengeName: `\095acme-challenge.example.test.`,
-	addresses:     []netip.Addr{netip.MustParseAddr("198.51.100.10"), netip.MustParseAddr("2001:db8:ffff::10")},
+}
+
+// testZoneHead declares what every zone file must, in names relative to the origin so that it serves any domain: the SOA record and two name servers inside the zone with their addresses, ns2 with an AAAA record as well, and the addresses of the apex.
+// The tests put the records they are about after it.
+const testZoneHead = `$TTL 300
+@    3600  SOA   ns1 admin 2024072600 900 900 1800 3600
+@    3600  NS    ns1
+@    3600  NS    ns2
+@    3600  A     192.0.2.10
+@    3600  A     192.0.2.11
+ns1  3600  A     192.0.2.10
+ns2  3600  A     192.0.2.11
+ns2  3600  AAAA  2001:db8:ffff::11
+`
+
+// testZoneHeadLines is the number of lines testZoneHead puts in front of the content of a test.
+var testZoneHeadLines = strings.Count(testZoneHead, "\n")
+
+// parseTestZone parses testZoneHead followed by content, for the zone example.test.
+func parseTestZone(content string) (*zoneFile, error) {
+	return parseZoneFile(strings.NewReader(testZoneHead+content), testZoneFileName, testServer)
+}
+
+// recordsAfterHead returns the records of the zone that the content after testZoneHead declares: testZoneHead declares no delegation, so its records come first among the zone's records.
+func recordsAfterHead(t *testing.T, file *zoneFile) []dns.RR {
+	t.Helper()
+	head := 0
+	zp := dns.NewZoneParser(strings.NewReader(testZoneHead), testOrigin+".", "")
+	for _, ok := zp.Next(); ok; _, ok = zp.Next() {
+		head++
+	}
+	if err := zp.Err(); err != nil {
+		t.Fatalf("parsing testZoneHead: %v", err)
+	}
+	if len(file.records) < head {
+		t.Fatalf("got %d records, fewer than the %d of testZoneHead", len(file.records), head)
+	}
+	return file.records[head:]
 }
 
 type wantDelegation struct {
-	nameServers []string
-	glue        []string
+	nsRecords []string
+	glue      []string
 }
 
 func rrString(t *testing.T, record string) string {
@@ -65,8 +102,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 	singleNS := func(t *testing.T) map[string]wantDelegation {
 		return map[string]wantDelegation{
 			"sub.example.test.": {
-				nameServers: rrStrings(t, "sub.example.test. 300 IN NS ns1.sub.example.test."),
-				glue:        rrStrings(t, "ns1.sub.example.test. 300 IN A 192.0.2.1"),
+				nsRecords: rrStrings(t, "sub.example.test. 300 IN NS ns1.sub.example.test."),
+				glue:      rrStrings(t, "ns1.sub.example.test. 300 IN A 192.0.2.1"),
 			},
 		}
 	}
@@ -97,8 +134,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					"sub.example.test.": {
-						nameServers: rrStrings(t, "sub.example.test. 300 IN NS ns.other.test.", "sub.example.test. 300 IN NS ns1.sub.example.test."),
-						glue:        rrStrings(t, "ns1.sub.example.test. 300 IN A 192.0.2.1", "ns1.sub.example.test. 300 IN AAAA 2001:db8::1"),
+						nsRecords: rrStrings(t, "sub.example.test. 300 IN NS ns.other.test.", "sub.example.test. 300 IN NS ns1.sub.example.test."),
+						glue:      rrStrings(t, "ns1.sub.example.test. 300 IN A 192.0.2.1", "ns1.sub.example.test. 300 IN AAAA 2001:db8::1"),
 					},
 				}
 			},
@@ -109,8 +146,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					"sub.example.test.": {
-						nameServers: rrStrings(t, "sub.example.test. 600 IN NS ns1.sub.example.test."),
-						glue:        rrStrings(t, "ns1.sub.example.test. 600 IN A 192.0.2.1"),
+						nsRecords: rrStrings(t, "sub.example.test. 600 IN NS ns1.sub.example.test."),
+						glue:      rrStrings(t, "ns1.sub.example.test. 600 IN A 192.0.2.1"),
 					},
 				}
 			},
@@ -121,8 +158,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					"sub.example.test.": {
-						nameServers: rrStrings(t, "sub.example.test. 120 IN NS ns1.sub.example.test."),
-						glue:        rrStrings(t, "ns1.sub.example.test. 60 IN A 192.0.2.1"),
+						nsRecords: rrStrings(t, "sub.example.test. 120 IN NS ns1.sub.example.test."),
+						glue:      rrStrings(t, "ns1.sub.example.test. 60 IN A 192.0.2.1"),
 					},
 				}
 			},
@@ -133,8 +170,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					"a.b.example.test.": {
-						nameServers: rrStrings(t, "a.b.example.test. 300 IN NS ns1.a.b.example.test."),
-						glue:        rrStrings(t, "ns1.a.b.example.test. 300 IN A 192.0.2.1"),
+						nsRecords: rrStrings(t, "a.b.example.test. 300 IN NS ns1.a.b.example.test."),
+						glue:      rrStrings(t, "ns1.a.b.example.test. 300 IN A 192.0.2.1"),
 					},
 				}
 			},
@@ -145,8 +182,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					"sub.example.test.": {
-						nameServers: rrStrings(t, "sub.example.test. 300 IN NS sub.example.test."),
-						glue:        rrStrings(t, "sub.example.test. 300 IN A 192.0.2.1"),
+						nsRecords: rrStrings(t, "sub.example.test. 300 IN NS sub.example.test."),
+						glue:      rrStrings(t, "sub.example.test. 300 IN A 192.0.2.1"),
 					},
 				}
 			},
@@ -157,11 +194,11 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					"one.example.test.": {
-						nameServers: rrStrings(t, "one.example.test. 300 IN NS ns.other.test."),
+						nsRecords: rrStrings(t, "one.example.test. 300 IN NS ns.other.test."),
 					},
 					"two.example.test.": {
-						nameServers: rrStrings(t, "two.example.test. 300 IN NS ns1.two.example.test."),
-						glue:        rrStrings(t, "ns1.two.example.test. 300 IN A 192.0.2.2"),
+						nsRecords: rrStrings(t, "two.example.test. 300 IN NS ns1.two.example.test."),
+						glue:      rrStrings(t, "ns1.two.example.test. 300 IN A 192.0.2.2"),
 					},
 				}
 			},
@@ -177,19 +214,19 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			want: func(t *testing.T) map[string]wantDelegation {
 				return map[string]wantDelegation{
 					`a\.b.example.test.`: {
-						nameServers: rrStrings(t, `a\.b.example.test. 300 IN NS ns1.a\.b.example.test.`),
-						glue:        rrStrings(t, `ns1.a\.b.example.test. 300 IN A 192.0.2.1`),
+						nsRecords: rrStrings(t, `a\.b.example.test. 300 IN NS ns1.a\.b.example.test.`),
+						glue:      rrStrings(t, `ns1.a\.b.example.test. 300 IN A 192.0.2.1`),
 					},
 				}
 			},
 		},
 		{
-			name:    "empty file",
+			name:    "nothing after the records every zone needs",
 			content: "",
 			want:    func(*testing.T) map[string]wantDelegation { return nil },
 		},
 		{
-			name:    "comments only",
+			name:    "comments only after the records every zone needs",
 			content: "; nothing is delegated\n\n   ; still nothing\n",
 			want:    func(*testing.T) map[string]wantDelegation { return nil },
 		},
@@ -197,12 +234,12 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			file, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			file, err := parseTestZone(tt.content)
 			if err != nil {
 				t.Fatalf("parseZoneFile: %v", err)
 			}
-			if len(file.records) != 0 {
-				t.Errorf("records = %q, want none", stringsOf(file.records))
+			if records := recordsAfterHead(t, file); len(records) != 0 {
+				t.Errorf("records = %q, want none", stringsOf(records))
 			}
 			got := file.cuts
 			want := tt.want(t)
@@ -214,8 +251,8 @@ func TestParseZoneFileAcceptsDelegations(t *testing.T) {
 			}
 			for cut, w := range want {
 				d := got.cuts[cut]
-				if gotNS := stringsOf(d.nameServers); !slices.Equal(gotNS, w.nameServers) {
-					t.Errorf("%s name servers = %q, want %q", cut, gotNS, w.nameServers)
+				if gotNS := stringsOf(d.nsRecords); !slices.Equal(gotNS, w.nsRecords) {
+					t.Errorf("%s name servers = %q, want %q", cut, gotNS, w.nsRecords)
 				}
 				if gotGlue := stringsOf(d.glue); !slices.Equal(gotGlue, w.glue) {
 					t.Errorf("%s glue = %q, want %q", cut, gotGlue, w.glue)
@@ -312,9 +349,19 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 			cuts:    []string{"sub.example.test."},
 		},
 		{
-			name:    "an address record equal to one of the server's own addresses outside every cut",
-			content: "www A 198.51.100.10\n",
-			records: []string{"www.example.test. 300 IN A 198.51.100.10"},
+			name:    "an address record equal to the address of one of the zone's name servers outside every cut",
+			content: "www A 192.0.2.10\n",
+			records: []string{"www.example.test. 300 IN A 192.0.2.10"},
+		},
+		{
+			name:    "a TXT record at a name server of the zone",
+			content: "ns1 TXT \"x\"\n",
+			records: []string{`ns1.example.test. 300 IN TXT "x"`},
+		},
+		{
+			name:    "a record whose TTL is 2147483647, the largest RFC 2181 allows",
+			content: "www 2147483647 TXT \"x\"\n",
+			records: []string{`www.example.test. 2147483647 IN TXT "x"`},
 		},
 		{
 			name:    "a CNAME whose target is outside the zone",
@@ -367,12 +414,12 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 			},
 		},
 		{
-			name:    "an MX record whose target is the apex",
+			name:    "an MX record whose target is the apex, which owns A records",
 			content: "@ MX 10 @\n",
 			records: []string{"example.test. 300 IN MX 10 example.test."},
 		},
 		{
-			name:    "an MX record whose target is a name server of the server",
+			name:    "an MX record whose target is a name server of the zone",
 			content: "@ MX 10 ns1\n",
 			records: []string{"example.test. 300 IN MX 10 ns1.example.test."},
 		},
@@ -427,11 +474,11 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			file, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			file, err := parseTestZone(tt.content)
 			if err != nil {
 				t.Fatalf("parseZoneFile: %v", err)
 			}
-			if got, want := stringsOf(file.records), rrStrings(t, tt.records...); !slices.Equal(got, want) {
+			if got, want := stringsOf(recordsAfterHead(t, file)), rrStrings(t, tt.records...); !slices.Equal(got, want) {
 				t.Errorf("records = %q, want %q", got, want)
 			}
 			if got := file.cuts.sortedCuts(); !slices.Equal(got, tt.cuts) {
@@ -445,12 +492,7 @@ func TestParseZoneFileAcceptsRecords(t *testing.T) {
 func TestParseZoneFileUnderAnOriginThatCarriesAnAddress(t *testing.T) {
 	const domain = "10-0-0-1.example.test"
 	const origin = domain + "."
-	server := zoneServer{
-		origin:        domain,
-		nameServers:   []string{"ns1." + origin, "ns2." + origin},
-		challengeName: "_acme-challenge." + origin,
-		addresses:     []netip.Addr{netip.MustParseAddr("198.51.100.10"), netip.MustParseAddr("198.51.100.11")},
-	}
+	server := zoneServer{origin: domain, challengeName: "_acme-challenge." + origin}
 
 	tests := []struct {
 		name    string
@@ -482,7 +524,7 @@ func TestParseZoneFileUnderAnOriginThatCarriesAnAddress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			file, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, server)
+			file, err := parseZoneFile(strings.NewReader(testZoneHead+tt.content), testZoneFileName, server)
 			if tt.want != "" {
 				if err == nil {
 					t.Fatalf("parseZoneFile succeeded with records %q, want the error %q", stringsOf(file.records), tt.want)
@@ -495,7 +537,7 @@ func TestParseZoneFileUnderAnOriginThatCarriesAnAddress(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseZoneFile: %v", err)
 			}
-			if got, want := stringsOf(file.records), rrStrings(t, tt.records...); !slices.Equal(got, want) {
+			if got, want := stringsOf(recordsAfterHead(t, file)), rrStrings(t, tt.records...); !slices.Equal(got, want) {
 				t.Errorf("records = %q, want %q", got, want)
 			}
 		})
@@ -539,14 +581,15 @@ func TestParseZoneFilePacksRecordsToTheDeclaredData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			file, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			file, err := parseTestZone(tt.content)
 			if err != nil {
 				t.Fatalf("parseZoneFile: %v", err)
 			}
-			if len(file.records) != 1 {
-				t.Fatalf("got %d records, want 1", len(file.records))
+			records := recordsAfterHead(t, file)
+			if len(records) != 1 {
+				t.Fatalf("got %d records, want 1", len(records))
 			}
-			if got := rdataOf(t, file.records[0]); !slices.Equal(got, tt.rdata) {
+			if got := rdataOf(t, records[0]); !slices.Equal(got, tt.rdata) {
 				t.Errorf("RDATA = %q, want %q", got, tt.rdata)
 			}
 		})
@@ -592,25 +635,26 @@ func TestParseZoneFileStoresNamesCanonical(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			file, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			file, err := parseTestZone(tt.content)
 			if err != nil {
 				t.Fatalf("parseZoneFile: %v", err)
 			}
-			if len(file.records) != 1 {
-				t.Fatalf("got %d records, want 1", len(file.records))
+			records := recordsAfterHead(t, file)
+			if len(records) != 1 {
+				t.Fatalf("got %d records, want 1", len(records))
 			}
-			if !tt.check(file.records[0]) {
-				t.Errorf("stored record %#v, want %s", file.records[0], tt.want)
+			if !tt.check(records[0]) {
+				t.Errorf("stored record %#v, want %s", records[0], tt.want)
 			}
 		})
 	}
 
 	t.Run("an NS record of a delegation is stored canonical", func(t *testing.T) {
-		file, err := parseZoneFile(strings.NewReader(`sub NS \078S.Other.Test.`+"\n"), testZoneFileName, testServer)
+		file, err := parseTestZone(`sub NS \078S.Other.Test.` + "\n")
 		if err != nil {
 			t.Fatalf("parseZoneFile: %v", err)
 		}
-		if ns := file.cuts.cuts["sub.example.test."].nameServers; len(ns) != 1 || ns[0].(*dns.NS).Ns != "ns.other.test." {
+		if ns := file.cuts.cuts["sub.example.test."].nsRecords; len(ns) != 1 || ns[0].(*dns.NS).Ns != "ns.other.test." {
 			t.Errorf("name servers = %q, want the one target ns.other.test.", stringsOf(ns))
 		}
 	})
@@ -618,7 +662,7 @@ func TestParseZoneFileStoresNamesCanonical(t *testing.T) {
 
 func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 	const validDelegation = "sub NS ns1.sub\nns1.sub A 192.0.2.1\n"
-	unsupported := "type %s is not supported: the zone file takes NS records for delegations and A, AAAA, CAA, CNAME, MX, SRV and TXT records"
+	unsupported := "type %s is not supported: the zone file takes SOA and NS records at the apex, NS records for delegations, and A, AAAA, CAA, CNAME, MX, SRV and TXT records"
 
 	tests := []struct {
 		name    string
@@ -638,9 +682,19 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("www.example.test.", "PTR", fmt.Sprintf(unsupported, "PTR")),
 		},
 		{
-			name:    "SOA record at the apex",
-			content: "@ SOA ns1 admin 1 900 900 1800 300\n",
-			want:    recordFault("example.test.", "SOA", fmt.Sprintf(unsupported, "SOA")),
+			name:    "a second SOA record",
+			content: "@ 3600 SOA ns1 admin 2 900 900 1800 3600\n",
+			want:    recordFault("example.test.", "SOA", "the zone has exactly one SOA record, and an earlier one is declared"),
+		},
+		{
+			name:    "an SOA record below the apex",
+			content: "sub SOA ns1 admin 1 900 900 1800 300\n",
+			want:    recordFault("sub.example.test.", "SOA", "an SOA record must be at the apex example.test."),
+		},
+		{
+			name:    "a record whose TTL is 2147483648, which RFC 2181 has a receiver treat as 0",
+			content: "www 2147483648 TXT \"x\"\n",
+			want:    recordFault("www.example.test.", "TXT", "TTL 2147483648 is larger than 2147483647: RFC 2181 section 8 has a receiver treat it as 0"),
 		},
 		{
 			name:    "DNAME record",
@@ -693,11 +747,6 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			name:    "a record after an $ORIGIN outside the zone",
 			content: "$ORIGIN other.test.\nwww TXT \"x\"\n",
 			want:    recordFault("www.other.test.", "TXT", "owner is outside the zone example.test."),
-		},
-		{
-			name:    "NS record at the apex",
-			content: "@ NS ns.other.test.\n",
-			want:    recordFault("example.test.", "NS", "an NS record must be below the apex example.test.: the zone's own name servers come from the configuration"),
 		},
 		{
 			name:    "wildcard owner",
@@ -785,19 +834,14 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("a.sub.example.test.", "NS", "delegation is nested below the delegation sub.example.test."),
 		},
 		{
-			name:    "cut spelled with decimal escapes equal to a name server of the server",
+			name:    "cut spelled with decimal escapes at a name server of the zone",
 			content: `\110\115\049 NS ns.other.test.` + "\n",
-			want:    recordFault("ns1.example.test.", "NS", "ns1.example.test. is reserved and cannot be delegated"),
+			want:    recordFault("example.test.", "NS", "name server ns1.example.test. is at or below the delegation ns1.example.test.: a name server of the zone must be outside every delegation"),
 		},
 		{
-			name:    "cut equal to a name server of the server",
-			content: "ns1 NS ns.other.test.\n",
-			want:    recordFault("ns1.example.test.", "NS", "ns1.example.test. is reserved and cannot be delegated"),
-		},
-		{
-			name:    "cut equal to a name server the server is given in non-canonical form",
+			name:    "cut at a name server of the zone",
 			content: "ns2 NS ns.other.test.\n",
-			want:    recordFault("ns2.example.test.", "NS", "ns2.example.test. is reserved and cannot be delegated"),
+			want:    recordFault("example.test.", "NS", "name server ns2.example.test. is at or below the delegation ns2.example.test.: a name server of the zone must be outside every delegation"),
 		},
 		{
 			name:    "cut equal to the ACME challenge name, which the server is given with a decimal escape",
@@ -810,7 +854,7 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("sub.example.test.", "NS", "name server ns.other.example.test. is inside the zone example.test. but outside the delegated zone sub.example.test.; it must be inside the delegated zone (with glue) or outside the zone"),
 		},
 		{
-			name:    "name server spelled with a decimal escape is one of the server's own name servers",
+			name:    "name server spelled with a decimal escape is one of the zone's name servers",
 			content: `sub NS ns1.\101xample.test.` + "\n",
 			want:    recordFault("sub.example.test.", "NS", "name server ns1.example.test. is inside the zone example.test. but outside the delegated zone sub.example.test.; it must be inside the delegated zone (with glue) or outside the zone"),
 		},
@@ -835,19 +879,19 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("www.sub.example.test.", "AAAA", "address record is not glue: www.sub.example.test. is not a name server of the delegation sub.example.test."),
 		},
 		{
-			name:    "A glue equal to one of the server's own addresses",
-			content: "sub NS ns1.sub\nns1.sub A 198.51.100.10\n",
-			want:    recordFault("ns1.sub.example.test.", "A", "name server ns1.sub.example.test. has the address 198.51.100.10, which is one of this server's own name server addresses; the delegation would point back at this server"),
+			name:    "A glue equal to the A record of one of the zone's name servers",
+			content: "sub NS ns1.sub\nns1.sub A 192.0.2.10\n",
+			want:    recordFault("ns1.sub.example.test.", "A", "name server ns1.sub.example.test. has the address 192.0.2.10, which is one of this zone's own name server addresses; the delegation would point back at this server"),
 		},
 		{
-			name:    "AAAA glue equal to one of the server's own addresses",
-			content: "sub NS ns1.sub\nns1.sub AAAA 2001:db8:ffff::10\n",
-			want:    recordFault("ns1.sub.example.test.", "AAAA", "name server ns1.sub.example.test. has the address 2001:db8:ffff::10, which is one of this server's own name server addresses; the delegation would point back at this server"),
+			name:    "AAAA glue equal to the AAAA record of one of the zone's name servers",
+			content: "sub NS ns1.sub\nns1.sub AAAA 2001:db8:ffff::11\n",
+			want:    recordFault("ns1.sub.example.test.", "AAAA", "name server ns1.sub.example.test. has the address 2001:db8:ffff::11, which is one of this zone's own name server addresses; the delegation would point back at this server"),
 		},
 		{
-			name:    "IPv4-mapped AAAA glue equal to one of the server's own addresses",
-			content: "sub NS ns1.sub\nns1.sub AAAA ::ffff:198.51.100.10\n",
-			want:    recordFault("ns1.sub.example.test.", "AAAA", "name server ns1.sub.example.test. has the address 198.51.100.10, which is one of this server's own name server addresses; the delegation would point back at this server"),
+			name:    "IPv4-mapped AAAA glue equal to the A record of one of the zone's name servers",
+			content: "sub NS ns1.sub\nns1.sub AAAA ::ffff:192.0.2.11\n",
+			want:    recordFault("ns1.sub.example.test.", "AAAA", "name server ns1.sub.example.test. has the address 192.0.2.11, which is one of this zone's own name server addresses; the delegation would point back at this server"),
 		},
 		{
 			name:    "TXT record at a cut",
@@ -860,24 +904,9 @@ func TestParseZoneFileRejectsInvalidFiles(t *testing.T) {
 			want:    recordFault("mail.sub.example.test.", "MX", "mail.sub.example.test. is at or below the delegation sub.example.test., where this server answers with a referral: only the addresses of its name servers can be declared there"),
 		},
 		{
-			name:    "TXT record at a name server of the server",
-			content: "ns1 TXT \"x\"\n",
-			want:    recordFault("ns1.example.test.", "TXT", "ns1.example.test. is reserved: the server answers for it itself"),
-		},
-		{
-			name:    "A record at a name server of the server",
-			content: "ns2 A 192.0.2.2\n",
-			want:    recordFault("ns2.example.test.", "A", "ns2.example.test. is reserved: the server answers for it itself"),
-		},
-		{
 			name:    "TXT record at the ACME challenge name",
 			content: "_acme-challenge TXT \"x\"\n",
 			want:    recordFault("_acme-challenge.example.test.", "TXT", "_acme-challenge.example.test. is reserved: the server answers for it itself"),
-		},
-		{
-			name:    "A record at the apex",
-			content: "@ A 192.0.2.1\n",
-			want:    recordFault("example.test.", "A", "the A records of the apex are the configured name server addresses"),
 		},
 		{
 			name:    "CNAME record at the apex",
@@ -998,7 +1027,7 @@ func expectZoneFileErrorPrefix(t *testing.T, content, prefix string) {
 
 func zoneFileError(t *testing.T, content string) error {
 	t.Helper()
-	got, err := parseZoneFile(strings.NewReader(content), testZoneFileName, testServer)
+	got, err := parseTestZone(content)
 	if err == nil {
 		t.Fatalf("parseZoneFile succeeded with cuts %v and records %q, want an error", got.cuts.sortedCuts(), stringsOf(got.records))
 	}
@@ -1029,6 +1058,8 @@ func TestParseZoneFileRejectsRecordsWithoutData(t *testing.T) {
 		{name: "an SRV record of zero octets", content: `_sip._tcp SRV \# 0` + "\n", owner: "_sip._tcp.example.test.", rrtype: "SRV"},
 		{name: "a CAA record of zero octets", content: `@ CAA \# 0` + "\n", owner: "example.test.", rrtype: "CAA"},
 		{name: "an A record of zero octets", content: `www A \# 0` + "\n", owner: "www.example.test.", rrtype: "A"},
+		{name: "an SOA record without data as the last line", content: "@ SOA\n", owner: "example.test.", rrtype: "SOA"},
+		{name: "an SOA record of zero octets", content: `@ SOA \# 0` + "\n", owner: "example.test.", rrtype: "SOA"},
 	}
 
 	for _, tt := range tests {
@@ -1050,7 +1081,7 @@ func TestParseZoneFileRejectsUnparsableFiles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			got, err := parseTestZone(tt.content)
 			if err == nil {
 				t.Fatalf("parseZoneFile succeeded with %v, want an error", got)
 			}
@@ -1078,7 +1109,7 @@ func TestParseZoneFileRefusesGenerate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			expectZoneFileError(t, tt.content, fmt.Sprintf("zone file %s: line %d: $GENERATE is not supported", testZoneFileName, tt.line))
+			expectZoneFileError(t, tt.content, fmt.Sprintf("zone file %s: line %d: $GENERATE is not supported", testZoneFileName, testZoneHeadLines+tt.line))
 		})
 	}
 }
@@ -1093,11 +1124,11 @@ func TestParseZoneFileReportsFaultsInOrder(t *testing.T) {
 		{
 			name:    "an unsupported type comes before a nested delegation declared earlier",
 			content: "sub NS ns.other.test.\na.sub NS ns.other.test.\nwww PTR other.test.\n",
-			want:    recordFault("www.example.test.", "PTR", "type PTR is not supported: the zone file takes NS records for delegations and A, AAAA, CAA, CNAME, MX, SRV and TXT records"),
+			want:    recordFault("www.example.test.", "PTR", "type PTR is not supported: the zone file takes SOA and NS records at the apex, NS records for delegations, and A, AAAA, CAA, CNAME, MX, SRV and TXT records"),
 		},
 		{
 			name:    "TTLs that differ within a record set come before a record at a reserved name declared earlier",
-			content: "ns1 TXT \"x\"\nwww 300 TXT \"a\"\nwww 600 TXT \"b\"\n",
+			content: "_acme-challenge TXT \"x\"\nwww 300 TXT \"a\"\nwww 600 TXT \"b\"\n",
 			want:    recordFault("www.example.test.", "TXT", "TTL 600 differs from TTL 300 of an earlier record with the same owner and type"),
 		},
 		{
@@ -1189,7 +1220,7 @@ func TestParseZoneFileAnswerSizeBoundary(t *testing.T) {
 	}
 
 	t.Run("a TXT record set whose answer takes 65524 octets is accepted", func(t *testing.T) {
-		if _, err := parseZoneFile(strings.NewReader(fmt.Sprintf("big TXT \"%s\"\n", txt(largestFittingTXTLength))), testZoneFileName, testServer); err != nil {
+		if _, err := parseTestZone(fmt.Sprintf("big TXT \"%s\"\n", txt(largestFittingTXTLength))); err != nil {
 			t.Fatalf("parseZoneFile: %v", err)
 		}
 	})
@@ -1364,7 +1395,7 @@ func TestReferralProbeName(t *testing.T) {
 func TestFindDelegation(t *testing.T) {
 	parse := func(content string) *zoneCuts {
 		t.Helper()
-		file, err := parseZoneFile(strings.NewReader(content), testZoneFileName, testServer)
+		file, err := parseTestZone(content)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1406,8 +1437,8 @@ func TestFindDelegation(t *testing.T) {
 			if gotCut != tt.wantCut {
 				t.Errorf("cut = %q, want %q", gotCut, tt.wantCut)
 			}
-			if len(d.nameServers) != 1 {
-				t.Errorf("got %d name servers, want 1", len(d.nameServers))
+			if len(d.nsRecords) != 1 {
+				t.Errorf("got %d name servers, want 1", len(d.nsRecords))
 			}
 		})
 	}
@@ -1456,109 +1487,49 @@ func TestIsProjectCut(t *testing.T) {
 // hostedRSADKIMValue is the RSA DKIM key that mail.mial.net signs the domain's mail with.
 const hostedRSADKIMValue = "v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2y9b1q/Of6doBMq4f16YJkM9BSMAdiNCyQhy1BcEVG9XpIObaJzhRWddhAPB6Awz/QqnCkx51AXuMDgKIsv2Cs87+jJoILdJ2T6HhS05kZj5FHBKMNctgcFzN2XRhXXpIVLWbA9Ef7takTa2AO5+qCT0M1xkumNQEXc/znTuaWS86e766hLA06a7pBwriJj4ceb5V6/q5fvfVq+EgJnk8WQ9DQRs4VjHaSVN0fscRzzJsZAQpa6KqmSLiXzM+NktGN40EZGqFrvvGcfdE+jEa++rePixXgKsETZCR32tKCNCELzbdTGchu01F6vZVxT/AGNfxzFWs9tuXdiltYmhbwIDAQAB"
 
-// rigTXTRecords spells a TXT set the e2e rig's zone file declares for the suite's truncation cases: n records, each of one string of 180 octets that starts with its position.
-func rigTXTRecords(label string, n int) []string {
-	records := make([]string, n)
-	for i := range n {
-		prefix := fmt.Sprintf("%s record %d of %d ", label, i+1, n)
-		records[i] = fmt.Sprintf(`%s.local-ip.test. 300 IN TXT "%s%s"`, label, prefix, strings.Repeat("x", 180-len(prefix)))
+// flyDomain is the domain fly.toml gives the production instance, the origin of its zone file.
+func flyDomain(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("..", "fly.toml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return records
+	var config struct {
+		Env map[string]string `toml:"env"`
+	}
+	if err := toml.Unmarshal(content, &config); err != nil {
+		t.Fatalf("reading fly.toml: %v", err)
+	}
+	domain := config.Env["XIP_DOMAIN"]
+	if domain == "" {
+		t.Fatal("fly.toml sets no XIP_DOMAIN")
+	}
+	return domain
 }
 
-// recordSetCount counts the distinct owner and type pairs among records.
-func recordSetCount(records []dns.RR) int {
-	type setKey struct {
-		owner  string
-		rrtype uint16
-	}
-	sets := make(map[setKey]bool)
-	for _, rr := range records {
-		sets[setKey{rr.Header().Name, rr.Header().Rrtype}] = true
-	}
-	return len(sets)
-}
-
-// TestRepositoryZoneFiles loads the zone files of the repository the way the servers they are delivered to do, so a file that would stop a server at startup fails here first.
+// TestRepositoryZoneFiles loads the zone files of the repository with the domain each is served for, the way the server they are delivered to does, so that a file that would stop a server at startup fails here first. What the files declare is checked by the black-box suite, which reads them too.
 func TestRepositoryZoneFiles(t *testing.T) {
 	tests := []struct {
-		path          string
-		origin        string
-		nameServers   []string
-		challengeName string
-		addresses     []netip.Addr
-		cuts          []string
-		records       []string
-		recordSets    int
+		path   string
+		domain string
 		// The hosted instance has users whose names a delegation would take away; the e2e rig has none.
 		hosted bool
 	}{
-		{
-			path:          filepath.Join("..", "zones", "local-ip.sh.zone"),
-			origin:        "local-ip.sh",
-			nameServers:   []string{"ns1.local-ip.sh.", "ns2.local-ip.sh."},
-			challengeName: "_acme-challenge.local-ip.sh.",
-			addresses:     []netip.Addr{netip.MustParseAddr("137.66.40.11"), netip.MustParseAddr("137.66.40.12")},
-			cuts:          nil,
-			records: []string{
-				"local-ip.sh. 300 IN MX 10 mail.mial.net.",
-				`local-ip.sh. 300 IN TXT "v=spf1 mx -all"`,
-				`202411e._domainkey.local-ip.sh. 300 IN TXT "v=DKIM1; k=ed25519; h=sha256; p=Xic3wKt0G+05OJw4q9U5FImcGnvKcMK5chBgYljJv8c="`,
-				fmt.Sprintf(`202411r._domainkey.local-ip.sh. 300 IN TXT "%s" "%s"`, hostedRSADKIMValue[:255], hostedRSADKIMValue[255:]),
-				`_dmarc.local-ip.sh. 300 IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@local-ip.sh"`,
-				`_smtp._tls.local-ip.sh. 300 IN TXT "v=TLSRPTv1; rua=mailto:postmaster@local-ip.sh"`,
-			},
-			recordSets: 6,
-			hosted:     true,
-		},
-		{
-			path:          filepath.Join("..", "e2e", "rig", "zone"),
-			origin:        "local-ip.test",
-			nameServers:   []string{"ns1.local-ip.test."},
-			challengeName: "_acme-challenge.local-ip.test.",
-			addresses:     []netip.Addr{netip.MustParseAddr("10.253.53.53")},
-			cuts:          []string{"e2e-delegated.local-ip.test."},
-			records: append([]string{
-				"e2e-records.local-ip.test. 300 IN A 192.0.2.10",
-				"e2e-records.local-ip.test. 300 IN AAAA 2001:db8::10",
-				`e2e-records.local-ip.test. 300 IN TXT "local-ip.sh e2e" "second string"`,
-				"e2e-records.local-ip.test. 300 IN MX 10 mail.example.net.",
-				`e2e-records.local-ip.test. 300 IN CAA 0 issue ";"`,
-				"e2e-alias.local-ip.test. 600 IN CNAME target.example.net.",
-				"_e2e._tcp.local-ip.test. 300 IN SRV 0 0 443 target.example.net.",
-				`local-ip.test. 300 IN TXT "local-ip.sh test instance"`,
-			}, append(rigTXTRecords("e2e-txt-udp", 4), rigTXTRecords("e2e-txt-tcp", 12)...)...),
-			recordSets: 10,
-		},
+		{path: filepath.Join("..", "zones", "local-ip.sh.zone"), domain: flyDomain(t), hosted: true},
+		{path: filepath.Join("..", "e2e", "rig", "zone"), domain: "local-ip.test"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			path := tt.path
-			content, err := os.ReadFile(path)
+			xip, err := NewXip(WithDomain(tt.domain), WithZoneFile(tt.path))
 			if err != nil {
 				t.Fatal(err)
-			}
-			server := zoneServer{origin: tt.origin, nameServers: tt.nameServers, challengeName: tt.challengeName, addresses: tt.addresses}
-			file, err := parseZoneFile(strings.NewReader(string(content)), path, server)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cuts := file.cuts.sortedCuts()
-			if !slices.Equal(cuts, tt.cuts) {
-				t.Errorf("cuts = %v, want %v", cuts, tt.cuts)
-			}
-			if got, want := stringsOf(file.records), rrStrings(t, tt.records...); !slices.Equal(got, want) {
-				t.Errorf("records = %q\nwant      %q", got, want)
-			}
-			if got := recordSetCount(file.records); got != tt.recordSets {
-				t.Errorf("%d record sets, want %d", got, tt.recordSets)
 			}
 			if !tt.hosted {
 				return
 			}
-			for _, cut := range cuts {
-				if !isProjectCut(cut, tt.origin) {
+			for _, cut := range xip.zone.cuts.sortedCuts() {
+				if !isProjectCut(cut, tt.domain) {
 					t.Errorf("%s delegates %s: only labels starting with %q may be delegated on the hosted instance, because a delegation takes users' names below the label away from the service", tt.path, cut, projectLabelPrefix)
 				}
 			}
@@ -1567,23 +1538,16 @@ func TestRepositoryZoneFiles(t *testing.T) {
 }
 
 func TestRepositoryZoneFilesHostedDKIMRecord(t *testing.T) {
-	const owner = "202411r._domainkey.local-ip.sh."
-	path := filepath.Join("..", "zones", "local-ip.sh.zone")
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := zoneServer{origin: "local-ip.sh", nameServers: []string{"ns1.local-ip.sh.", "ns2.local-ip.sh."}, challengeName: "_acme-challenge.local-ip.sh."}
-	file, err := parseZoneFile(strings.NewReader(string(content)), path, server)
+	domain := flyDomain(t)
+	owner := "202411r._domainkey." + domain + "."
+	xip, err := NewXip(WithDomain(domain), WithZoneFile(filepath.Join("..", "zones", "local-ip.sh.zone")))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var dkim []*dns.TXT
-	for _, rr := range file.records {
-		if txt, ok := rr.(*dns.TXT); ok && rr.Header().Name == owner {
-			dkim = append(dkim, txt)
-		}
+	for _, rr := range xip.zone.records[owner][dns.TypeTXT] {
+		dkim = append(dkim, rr.(*dns.TXT))
 	}
 	if len(dkim) != 1 {
 		t.Fatalf("got %d TXT records at %s, want 1", len(dkim), owner)
@@ -1604,4 +1568,189 @@ func TestRepositoryZoneFilesHostedDKIMRecord(t *testing.T) {
 			t.Errorf("the answer for %s TXT takes %d octets, more than %d", owner, size, classicUDPLimit)
 		}
 	})
+}
+
+// minimalSOA begins the whole files of the tests below, which do without testZoneHead, with the default TTL and the SOA record.
+const minimalSOA = "$TTL 300\n@ 3600 SOA ns1 admin 1 900 900 1800 3600\n"
+
+// TestParseZoneFileAcceptsApexRecords gives whole files, without testZoneHead, for the rules on the SOA and apex NS records.
+func TestParseZoneFileAcceptsApexRecords(t *testing.T) {
+	tests := []struct {
+		name                string
+		content             string
+		records             []string
+		cuts                []string
+		nameServerAddresses []string
+	}{
+		{
+			name:    "a name server outside the zone needs no address record",
+			content: minimalSOA + "@ NS ns.other.test.\n",
+			records: []string{"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600", "example.test. 300 IN NS ns.other.test."},
+		},
+		{
+			name:    "apex NS records are not a delegation: the names below the apex stay the zone's",
+			content: minimalSOA + "@ NS ns1\nns1 A 192.0.2.10\nwww TXT \"x\"\n",
+			records: []string{
+				"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600",
+				"example.test. 300 IN NS ns1.example.test.",
+				"ns1.example.test. 300 IN A 192.0.2.10",
+				`www.example.test. 300 IN TXT "x"`,
+			},
+			nameServerAddresses: []string{"ns1.example.test. 300 IN A 192.0.2.10"},
+		},
+		{
+			name:    "the addresses of the name servers are their A and then their AAAA records, in the order of the NS records",
+			content: minimalSOA + "@ NS ns2\n@ NS ns.other.test.\n@ NS ns1\nns1 AAAA 2001:db8::1\nns1 A 192.0.2.1\nns2 A 192.0.2.2\nns1 A 192.0.2.3\n",
+			records: []string{
+				"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600",
+				"example.test. 300 IN NS ns2.example.test.",
+				"example.test. 300 IN NS ns.other.test.",
+				"example.test. 300 IN NS ns1.example.test.",
+				"ns1.example.test. 300 IN AAAA 2001:db8::1",
+				"ns1.example.test. 300 IN A 192.0.2.1",
+				"ns2.example.test. 300 IN A 192.0.2.2",
+				"ns1.example.test. 300 IN A 192.0.2.3",
+			},
+			nameServerAddresses: []string{
+				"ns2.example.test. 300 IN A 192.0.2.2",
+				"ns1.example.test. 300 IN A 192.0.2.1",
+				"ns1.example.test. 300 IN A 192.0.2.3",
+				"ns1.example.test. 300 IN AAAA 2001:db8::1",
+			},
+		},
+		{
+			name:    "a name server that is the apex has the apex's addresses",
+			content: minimalSOA + "@ NS @\n@ A 192.0.2.10\n",
+			records: []string{
+				"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600",
+				"example.test. 300 IN NS example.test.",
+				"example.test. 300 IN A 192.0.2.10",
+			},
+			nameServerAddresses: []string{"example.test. 300 IN A 192.0.2.10"},
+		},
+		{
+			name:    "a name server beside a delegation",
+			content: minimalSOA + "@ NS ns1\nns1 A 192.0.2.10\nsub NS ns.other.test.\n",
+			records: []string{
+				"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600",
+				"example.test. 300 IN NS ns1.example.test.",
+				"ns1.example.test. 300 IN A 192.0.2.10",
+			},
+			cuts:                []string{"sub.example.test."},
+			nameServerAddresses: []string{"ns1.example.test. 300 IN A 192.0.2.10"},
+		},
+		{
+			name:    "an MX record whose target is the apex with an A record",
+			content: minimalSOA + "@ NS ns.other.test.\n@ A 192.0.2.25\n@ MX 10 @\n",
+			records: []string{
+				"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600",
+				"example.test. 300 IN NS ns.other.test.",
+				"example.test. 300 IN A 192.0.2.25",
+				"example.test. 300 IN MX 10 example.test.",
+			},
+		},
+		{
+			name:    "an SRV record whose target is the apex with an AAAA record",
+			content: minimalSOA + "@ NS ns.other.test.\n@ AAAA 2001:db8::25\n_sip._tcp SRV 0 5 5060 @\n",
+			records: []string{
+				"example.test. 3600 IN SOA ns1.example.test. admin.example.test. 1 900 900 1800 3600",
+				"example.test. 300 IN NS ns.other.test.",
+				"example.test. 300 IN AAAA 2001:db8::25",
+				"_sip._tcp.example.test. 300 IN SRV 0 5 5060 example.test.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			if err != nil {
+				t.Fatalf("parseZoneFile: %v", err)
+			}
+			if got, want := stringsOf(file.records), rrStrings(t, tt.records...); !slices.Equal(got, want) {
+				t.Errorf("records = %q\nwant      %q", got, want)
+			}
+			if got := file.cuts.sortedCuts(); !slices.Equal(got, tt.cuts) {
+				t.Errorf("cuts = %q, want %q", got, tt.cuts)
+			}
+			if got, want := stringsOf(file.nameServerAddresses), rrStrings(t, tt.nameServerAddresses...); !slices.Equal(got, want) {
+				t.Errorf("name server addresses = %q, want %q", got, want)
+			}
+			if file.soa != file.records[0] {
+				t.Errorf("soa = %v, want the stored SOA record %v", file.soa, file.records[0])
+			}
+		})
+	}
+}
+
+// TestParseZoneFileRejectsApexRecords gives whole files, without testZoneHead, for the rules on the SOA and apex NS records.
+func TestParseZoneFileRejectsApexRecords(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "an empty file",
+			content: "",
+			want:    "zone file test.zone: there is no SOA record at the apex example.test.",
+		},
+		{
+			name:    "a file without an SOA record",
+			content: "@ NS ns.other.test.\n",
+			want:    "zone file test.zone: there is no SOA record at the apex example.test.",
+		},
+		{
+			name:    "a file without an NS record at the apex",
+			content: minimalSOA + "sub NS ns.other.test.\n",
+			want:    "zone file test.zone: there is no NS record at the apex example.test.: the zone needs at least one name server",
+		},
+		{
+			name:    "a name server inside the zone without an address record",
+			content: minimalSOA + "@ NS ns1\nns1 TXT \"x\"\n",
+			want:    recordFault("example.test.", "NS", "name server ns1.example.test. is inside the zone and has no A or AAAA record"),
+		},
+		{
+			name:    "a name server inside a delegation",
+			content: minimalSOA + "@ NS ns.dns\ndns NS ns.other.test.\nns.dns A 192.0.2.53\n",
+			want:    recordFault("example.test.", "NS", "name server ns.dns.example.test. is at or below the delegation dns.example.test.: a name server of the zone must be outside every delegation"),
+		},
+		{
+			name:    "a name server whose name carries an address",
+			content: minimalSOA + "@ NS ns-192-0-2-53\n",
+			want:    recordFault("example.test.", "NS", "name server ns-192-0-2-53.example.test. carries the address 192.0.2.53 in its name: such a name resolves to that address and cannot own the address records of a name server"),
+		},
+		{
+			name:    "a name server at the challenge name, which cannot own records",
+			content: minimalSOA + "@ NS _acme-challenge\n",
+			want:    recordFault("example.test.", "NS", "name server _acme-challenge.example.test. is inside the zone and has no A or AAAA record"),
+		},
+		{
+			name:    "an MX record whose target is the apex without an address record",
+			content: minimalSOA + "@ NS ns.other.test.\n@ MX 10 @\n",
+			want:    recordFault("example.test.", "MX", "target example.test. is inside the zone example.test. and has no address record"),
+		},
+		{
+			name:    "an SRV record whose target is the apex without an address record",
+			content: minimalSOA + "@ NS ns.other.test.\n_sip._tcp SRV 0 5 5060 @\n",
+			want:    recordFault("_sip._tcp.example.test.", "SRV", "target example.test. is inside the zone example.test. and has no address record"),
+		},
+		{
+			name:    "an SOA record without data as the last line of a file without another",
+			content: "@ NS ns.other.test.\n@ SOA\n",
+			want:    recordFault("example.test.", "SOA", "record has no data"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseZoneFile(strings.NewReader(tt.content), testZoneFileName, testServer)
+			if err == nil {
+				t.Fatalf("parseZoneFile succeeded with records %q, want the error %q", stringsOf(got.records), tt.want)
+			}
+			if err.Error() != tt.want {
+				t.Errorf("error = %q\nwant    %q", err, tt.want)
+			}
+		})
+	}
 }

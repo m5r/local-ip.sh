@@ -26,7 +26,7 @@ const (
 )
 
 // pinnedClient sends every request to ip whatever the URL host, which stays the TLS server name
-// and the verified name, so each nameserver's instance is checked on its own.
+// and the verified name, so the instance behind each address of the website is checked on its own.
 func pinnedClient(t *testing.T, tg *target, ip netip.Addr) *http.Client {
 	t.Helper()
 	client := newPinnedClient(ip, tg.roots)
@@ -106,7 +106,7 @@ func peerLeaf(t *testing.T, resp *http.Response) *x509.Certificate {
 
 func website(t *testing.T, tg *target) {
 	d := tg.domain
-	for _, ip := range tg.nameServers {
+	for _, ip := range tg.webAddresses {
 		t.Run(ip.String(), func(t *testing.T) {
 			client := pinnedClient(t, tg, ip)
 
@@ -217,7 +217,7 @@ func wildcardCertificate(t *testing.T, tg *target) {
 	d := tg.domain
 	var firstPair *keyPair
 
-	for i, ip := range tg.nameServers {
+	for i, ip := range tg.webAddresses {
 		t.Run(ip.String(), func(t *testing.T) {
 			client := pinnedClient(t, tg, ip)
 			pair := matchingPair(t, client, d)
@@ -253,7 +253,7 @@ func wildcardCertificate(t *testing.T, tg *target) {
 
 	t.Run("served from a LAN address", func(t *testing.T) {
 		if firstPair == nil {
-			t.Fatalf("no matching certificate and key were downloaded from %s", tg.nameServers[0])
+			t.Fatalf("no matching certificate and key were downloaded from %s", tg.webAddresses[0])
 		}
 		lanRoundTrip(t, tg, *firstPair)
 	})
@@ -285,12 +285,12 @@ func lanRoundTrip(t *testing.T, tg *target, pair keyPair) {
 
 	for _, host := range lanRoundTripHosts(tg.domain) {
 		t.Run(host, func(t *testing.T) {
-			addrs, err := lookupA(t, tg.nameServers[0], dns.Fqdn(host))
+			addrs, err := lookupA(t, tg.dnsServers[0], dns.Fqdn(host))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !slices.Equal(addrs, []netip.Addr{loopback}) {
-				t.Fatalf("%s A from %s = %v, want [%s]", host, tg.nameServers[0], addrs, loopback)
+				t.Fatalf("%s A from %s = %v, want [%s]", host, tg.dnsServers[0], addrs, loopback)
 			}
 
 			client := pinnedClient(t, tg, addrs[0])

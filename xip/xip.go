@@ -3,10 +3,7 @@ package xip
 import (
 	"errors"
 	"fmt"
-	"net/mail"
-	"net/netip"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 
@@ -17,16 +14,14 @@ import (
 )
 
 type Xip struct {
-	nameServerAddresses []string
-	domain              string
-	email               string
-	zoneFile            string
-	zone                *zone
-	logger              zerolog.Logger
-	region              string
-	challengeName       string
-	challengeMu         sync.RWMutex
-	challengeValues     map[string]struct{}
+	domain          string
+	zoneFile        string
+	zone            *zone
+	logger          zerolog.Logger
+	region          string
+	challengeName   string
+	challengeMu     sync.RWMutex
+	challengeValues map[string]struct{}
 }
 
 type Option func(*Xip)
@@ -37,12 +32,7 @@ func WithDomain(domain string) Option {
 	}
 }
 
-func WithEmail(email string) Option {
-	return func(x *Xip) {
-		x.email = email
-	}
-}
-
+// WithZoneFile names the zone file, which declares every record the server stores; the domain is its origin.
 func WithZoneFile(path string) Option {
 	return func(x *Xip) {
 		x.zoneFile = path
@@ -62,25 +52,11 @@ func WithRegion(region string) Option {
 	}
 }
 
-// WithNameServers sets the IPv4 addresses of the zone's name servers, served as ns1, ns2 and so on in the order given, and as the A records of the apex.
-func WithNameServers(addresses []string) Option {
-	return func(x *Xip) {
-		x.nameServerAddresses = slices.Clone(addresses)
-	}
-}
-
 func chunkBy(str string, chunkSize int) (chunks []string) {
 	for chunkSize < len(str) {
 		str, chunks = str[chunkSize:], append(chunks, str[0:chunkSize])
 	}
 	return append(chunks, str)
-}
-
-func emailToRname(email string) string {
-	parts := strings.SplitN(email, "@", 2)
-	localPart := strings.ReplaceAll(parts[0], ".", "\\.")
-	domain := parts[1]
-	return localPart + "." + domain + "."
 }
 
 func (xip *Xip) handleDnsRequest(response dns.ResponseWriter, request *dns.Msg) {
@@ -147,7 +123,7 @@ func (xip *Xip) answer(request, message *dns.Msg) {
 	if cut, d, ok := xip.zone.cuts.find(name); ok {
 		// A DS record set at a cut belongs to the parent zone (RFC 4035 section 3.1.4.1), which is this one and has none.
 		if question.Qtype != dns.TypeDS || name != cut {
-			message.Ns = copies(d.nameServers)
+			message.Ns = copies(d.nsRecords)
 			message.Extra = copies(d.glue)
 			return
 		}
@@ -210,7 +186,7 @@ func (xip *Xip) logResolved(message *dns.Msg) {
 	event.Msg("resolved")
 }
 
-// NewXip builds a server for one zone. It requires a valid domain (WithDomain), a bare email address for the SOA record (WithEmail) and at least one IPv4 name server address (WithNameServers). It reads no process-wide configuration and binds no socket: see Serve.
+// NewXip builds a server for one zone. It requires a valid domain (WithDomain) and a zone file whose origin it is (WithZoneFile). It reads no process-wide configuration and binds no socket: see Serve.
 func NewXip(opts ...Option) (*Xip, error) {
 	xip := &Xip{
 		logger:          utils.Logger,
@@ -228,54 +204,26 @@ func NewXip(opts ...Option) (*Xip, error) {
 	xip.domain = domain
 	xip.challengeName = challengeLabel + domain + "."
 
-	if address, err := mail.ParseAddress(xip.email); err != nil || address.Address != xip.email {
-		return nil, fmt.Errorf("xip: email %q is not a bare address", xip.email)
+	if xip.zoneFile == "" {
+		return nil, errors.New("xip: a zone file is required")
 	}
-
-	if len(xip.nameServerAddresses) == 0 {
-		return nil, errors.New("xip: at least one name server is required")
+	f, err := os.Open(xip.zoneFile)
+	if err != nil {
+		return nil, fmt.Errorf("opening zone file %s: %w", xip.zoneFile, err)
 	}
-	addresses := make([]netip.Addr, len(xip.nameServerAddresses))
-	for i, ns := range xip.nameServerAddresses {
-		addr, err := netip.ParseAddr(ns)
-		if err != nil || !addr.Is4() {
-			return nil, fmt.Errorf("xip: name server %q is not an IPv4 address", ns)
-		}
-		addresses[i] = addr
-	}
-
-	var file *zoneFile
-	if xip.zoneFile != "" {
-		f, err := os.Open(xip.zoneFile)
-		if err != nil {
-			return nil, fmt.Errorf("opening zone file %s: %w", xip.zoneFile, err)
-		}
-		defer f.Close()
-		file, err = parseZoneFile(f, xip.zoneFile, zoneServer{
-			origin:        domain,
-			nameServers:   nameServerNames(domain+".", len(addresses)),
-			challengeName: xip.challengeName,
-			addresses:     addresses,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	zone, err := newZone(domain, xip.email, addresses, file)
+	defer f.Close()
+	file, err := parseZoneFile(f, xip.zoneFile, zoneServer{origin: domain, challengeName: xip.challengeName})
 	if err != nil {
 		return nil, err
 	}
-	xip.zone = zone
+	xip.zone = newZone(file)
 
-	if file != nil {
-		cuts := file.cuts.sortedCuts()
-		xip.logger.Info().
-			Str("zone_file", xip.zoneFile).
-			Int("delegations", len(cuts)).
-			Strs("cuts", cuts).
-			Int("records", len(file.records)).
-			Msg("Loaded zone file")
-	}
+	cuts := file.cuts.sortedCuts()
+	xip.logger.Info().
+		Str("zone_file", xip.zoneFile).
+		Int("delegations", len(cuts)).
+		Strs("cuts", cuts).
+		Int("records", len(file.records)).
+		Msg("Loaded zone file")
 	return xip, nil
 }

@@ -1,8 +1,6 @@
 package xip
 
 import (
-	"errors"
-	"fmt"
 	"net/netip"
 	"strings"
 
@@ -11,9 +9,6 @@ import (
 
 // addressTTL is the TTL of the address a name carries: the answer follows from the name alone, and only a delegation added later at or above the name can change it.
 const addressTTL uint32 = 86400
-
-// recordTTL is the TTL of every record the server builds from its configuration, and the SOA's MINIMUM field, so that a negative answer is kept as long: the operator changes the configuration and the zone file rarely and by hand, and publishes a new record that long before anything depends on it.
-const recordTTL uint32 = 3600
 
 // anyTTL is the TTL of the HINFO record that answers a query for ANY: RFC 8482 section 4.2 asks for one long enough to suppress frequent repeats.
 const anyTTL uint32 = 3600
@@ -34,69 +29,28 @@ const (
 
 // zone is everything the server answers from, apart from the challenge values. NewXip builds it once and nothing changes it afterwards, so handlers read it without a lock.
 type zone struct {
-	apex        string
-	nameServers []string
-	soa         *dns.SOA
+	apex string
+	soa  *dns.SOA
 	// records holds every stored record by canonical owner and type, owned by that canonical name; none of them is ever handed out without a copy, because replies are packed concurrently.
 	records map[string]map[uint16][]dns.RR
 	cuts    *zoneCuts
+	// nameServerAddresses is the additional section of the NS answer at the apex.
+	nameServerAddresses []dns.RR
 }
 
-// newZone builds the zone from the configuration and from what the zone file declares (nil without a zone file), and checks that its built-in answers fit in a DNS message.
-func newZone(domain, email string, nameServers []netip.Addr, file *zoneFile) (*zone, error) {
-	apex, err := canonicalName(domain)
-	if err != nil {
-		return nil, fmt.Errorf("xip: domain %s: %w", domain, err)
-	}
-	if len(nameServers) == 0 {
-		return nil, errors.New("xip: at least one name server is required")
-	}
-	rname, err := canonicalName(emailToRname(email))
-	if err != nil {
-		return nil, fmt.Errorf("xip: email %s cannot be the RNAME of the SOA record: %w", email, err)
-	}
-
+// newZone builds the zone from what a zone file declares, which parseZoneFile has checked.
+func newZone(file *zoneFile) *zone {
 	z := &zone{
-		apex:        apex,
-		nameServers: nameServerNames(apex, len(nameServers)),
-		records:     make(map[string]map[uint16][]dns.RR),
+		apex:                file.cuts.apex,
+		soa:                 file.soa,
+		records:             make(map[string]map[uint16][]dns.RR),
+		cuts:                file.cuts,
+		nameServerAddresses: file.nameServerAddresses,
 	}
-	z.soa = &dns.SOA{
-		Hdr:     header(apex, dns.TypeSOA, recordTTL),
-		Ns:      z.nameServers[0],
-		Mbox:    rname,
-		Serial:  2024072600,
-		Refresh: 900,
-		Retry:   900,
-		Expire:  1800,
-		Minttl:  recordTTL,
+	for _, rr := range file.records {
+		z.add(rr)
 	}
-	z.add(z.soa)
-	for i, addr := range nameServers {
-		z.add(&dns.NS{Hdr: header(apex, dns.TypeNS, recordTTL), Ns: z.nameServers[i]})
-		z.add(&dns.A{Hdr: header(apex, dns.TypeA, recordTTL), A: addr.AsSlice()})
-		z.add(&dns.A{Hdr: header(z.nameServers[i], dns.TypeA, recordTTL), A: addr.AsSlice()})
-	}
-	if file != nil {
-		z.cuts = file.cuts
-		for _, rr := range file.records {
-			z.add(rr)
-		}
-	}
-
-	if err := z.checkResponseSizes(); err != nil {
-		return nil, err
-	}
-	return z, nil
-}
-
-// nameServerNames returns the names of the zone's own name servers, ns1 to nsN below the apex, in the order of their addresses.
-func nameServerNames(apex string, count int) []string {
-	names := make([]string, count)
-	for i := range names {
-		names[i] = fmt.Sprintf("ns%d.%s", i+1, apex)
-	}
-	return names
+	return z
 }
 
 func header(owner string, rrtype uint16, ttl uint32) dns.RR_Header {
@@ -111,32 +65,6 @@ func (z *zone) add(rr dns.RR) {
 		z.records[owner] = sets
 	}
 	sets[rr.Header().Rrtype] = append(sets[rr.Header().Rrtype], rr)
-}
-
-// checkResponseSizes refuses a configuration whose built-in answers at the apex, which grow with the list of name servers, would not fit in a DNS message; every other reply is bounded by construction or by the zone file's own checks.
-func (z *zone) checkResponseSizes() error {
-	qname := upperASCII(z.apex)
-	nsSize, err := responseSize(qname, dns.TypeNS, ownedBy(qname, z.records[z.apex][dns.TypeNS]), nil, z.nameServerAddresses())
-	if err := z.checkBuiltInAnswer(dns.TypeNS, nsSize, err); err != nil {
-		return err
-	}
-	for _, rrtype := range []uint16{dns.TypeA, dns.TypeSOA} {
-		size, err := answerSize(z.apex, z.records[z.apex][rrtype])
-		if err := z.checkBuiltInAnswer(rrtype, size, err); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (z *zone) checkBuiltInAnswer(rrtype uint16, size int, err error) error {
-	if err != nil {
-		return fmt.Errorf("xip: building the answer for %s %s: %w", z.apex, dns.Type(rrtype), err)
-	}
-	if size > maxResponseSize {
-		return fmt.Errorf("xip: the answer for %s %s takes %d octets, more than the limit of %d octets for a DNS message; there are too many name servers for this domain", z.apex, dns.Type(rrtype), size, maxResponseSize)
-	}
-	return nil
 }
 
 // lookup answers a question whose name is inside the zone, outside every delegation and not the challenge name. name must be the canonical form of the question name (dns.CanonicalName): the handler needs that form for the cut and the challenge name before it gets here, and passing it in folds the case of a name once per query. The answer records are owned by the question name as asked and are the caller's to send. additional holds the name server addresses for NS at the apex and is nil otherwise.
@@ -160,7 +88,7 @@ func (z *zone) lookup(question dns.Question, name string) (kind lookupKind, answ
 		return lookupAnswer, []dns.RR{anyAnswer(question.Name, anyTTL)}, nil
 	case sets[question.Qtype] != nil:
 		if question.Qtype == dns.TypeNS && name == z.apex {
-			additional = z.nameServerAddresses()
+			additional = copies(z.nameServerAddresses)
 		}
 		return lookupAnswer, ownedBy(question.Name, sets[question.Qtype]), additional
 	case cname != nil:
@@ -214,15 +142,6 @@ func copies(set []dns.RR) []dns.RR {
 	records := make([]dns.RR, len(set))
 	for i, rr := range set {
 		records[i] = dns.Copy(rr)
-	}
-	return records
-}
-
-// nameServerAddresses returns the A records of the zone's own name servers, for the additional section of the NS answer at the apex.
-func (z *zone) nameServerAddresses() []dns.RR {
-	var records []dns.RR
-	for _, name := range z.nameServers {
-		records = append(records, copies(z.records[name][dns.TypeA])...)
 	}
 	return records
 }

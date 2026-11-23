@@ -18,11 +18,7 @@ const (
 
 func newChallengeXip(t *testing.T) *Xip {
 	t.Helper()
-	xip, err := NewXip(
-		WithDomain(challengeTestDomain),
-		WithEmail("admin@"+challengeTestDomain),
-		WithNameServers([]string{"192.0.2.10", "192.0.2.11"}),
-	)
+	xip, err := NewXip(WithDomain(challengeTestDomain), withTestZone(t, ""))
 	if err != nil {
 		t.Fatalf("NewXip: %v", err)
 	}

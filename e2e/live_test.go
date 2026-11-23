@@ -31,7 +31,7 @@ func liveSections(t *testing.T, tg *target) {
 	for i, d := range tg.delegations {
 		cuts[i] = d.cut
 	}
-	t.Logf("target: %s, domain %s, nameservers %v, publicly delegated %t, delegations %v", tg.name, tg.domain, tg.nameServers, tg.publiclyDelegated, cuts)
+	t.Logf("target: %s, domain %s, name servers at %v, website at %v, publicly delegated %t, delegations %v", tg.name, tg.domain, tg.dnsServers, tg.webAddresses, tg.publiclyDelegated, cuts)
 
 	t.Run("AuthoritativeAnswers", func(t *testing.T) { authoritativeAnswers(t, tg) })
 	t.Run("Delegations", func(t *testing.T) { delegationChecks(t, tg) })

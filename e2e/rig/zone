@@ -1,6 +1,12 @@
 ; Zone file of the server in the e2e rig, origin local-ip.test.
 ; The default TTL is stated so that the TTL written on one record does not become the default of the records after it.
 $TTL 300
+; The name server's name and every number below differ from the production file's, so that a value fixed in the server or in the suite instead of read from the file shows up as a failure. The AAAA record is a documentation address (RFC 3849): the suite reaches the server over IPv4 only.
+@     1800  SOA   dns-a hostmaster 2026112301 7200 600 86400 120
+@     7200  NS    dns-a
+dns-a 1200  A     10.253.53.53
+dns-a 1200  AAAA  2001:db8:53::53
+@     600   A     10.253.53.53
 ; This delegation exists only so the e2e suite can verify referrals.
 ; 192.0.2.53 is a documentation address (RFC 5737) where nothing answers.
 e2e-delegated      NS  ns1.e2e-delegated

@@ -111,8 +111,8 @@ func newConfig(t *testing.T, logs *logBuffer) app.Config {
 	})
 	return app.Config{
 		Domain:          testDomain,
+		ZoneFile:        app.WriteTestZone(t),
 		Email:           "admin@" + testDomain,
-		NameServers:     []string{"192.0.2.53"},
 		DNSUDPAddress:   "127.0.0.1:0",
 		DNSTCPAddress:   "127.0.0.1:0",
 		HTTPAddress:     "127.0.0.1:0",
@@ -706,8 +706,8 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	}{
 		{name: "empty domain", set: func(cfg *app.Config) { cfg.Domain = "" }, want: "invalid domain"},
 		{name: "domain made of dots", set: func(cfg *app.Config) { cfg.Domain = ".." }, want: "invalid domain"},
-		{name: "email with a display name", set: func(cfg *app.Config) { cfg.Email = "Admin <admin@app.test>" }, want: "DNS server:"},
-		{name: "name server that is not IPv4", set: func(cfg *app.Config) { cfg.NameServers = []string{"::1"} }, want: "DNS server:"},
+		{name: "email with a display name", set: func(cfg *app.Config) { cfg.Email = "Admin <admin@app.test>" }, want: "certificates:"},
+		{name: "no zone file", set: func(cfg *app.Config) { cfg.ZoneFile = "" }, want: "DNS server: xip: a zone file is required"},
 		{name: "missing zone file", set: func(cfg *app.Config) { cfg.ZoneFile = filepath.Join(t.TempDir(), "missing.zone") }, want: "DNS server:"},
 		{name: "empty state directory", set: func(cfg *app.Config) { cfg.StateDir = "" }, want: "certificates:"},
 	} {

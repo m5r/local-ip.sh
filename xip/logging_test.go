@@ -59,8 +59,7 @@ func newLoggingXip(tb testing.TB, domain string, level zerolog.Level, out io.Wri
 	tb.Helper()
 	xip, err := NewXip(append([]Option{
 		WithDomain(domain),
-		WithEmail("admin@" + domain),
-		WithNameServers([]string{"192.0.2.10"}),
+		withTestZone(tb, ""),
 		WithLogger(zerolog.New(out).Level(level).With().Timestamp().Logger()),
 	}, extra...)...)
 	if err != nil {

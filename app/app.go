@@ -22,12 +22,11 @@ import (
 
 // Config is everything the program needs; nothing is read from the environment or from process-wide state.
 type Config struct {
-	// Domain is the zone apex, Email the administrator's address (SOA record and ACME account), NameServers the IPv4 addresses of ns1, ns2, ... .Domain.
-	Domain      string
-	Email       string
-	NameServers []string
-	// ZoneFile is the path of the delegations file; empty means none.
+	// Domain is the zone apex and the origin of ZoneFile, the zone file that declares every record the DNS server stores.
+	Domain   string
 	ZoneFile string
+	// Email is the contact of the ACME account; it may be empty.
+	Email string
 
 	// DNSUDPAddress and DNSTCPAddress are where the DNS server listens over each transport, HTTPAddress and HTTPSAddress where the web server listens; all are listen addresses in the form net.Listen takes. The DNS addresses are separate because a host may deliver UDP and TCP to different interfaces, as Fly does.
 	DNSUDPAddress string
@@ -70,17 +69,12 @@ func New(cfg Config) (*App, error) {
 		return nil, err
 	}
 
-	dnsOptions := []xip.Option{
+	dnsServer, err := xip.NewXip(
 		xip.WithDomain(domain),
-		xip.WithEmail(cfg.Email),
-		xip.WithNameServers(cfg.NameServers),
+		xip.WithZoneFile(cfg.ZoneFile),
 		xip.WithRegion(cfg.Region),
 		xip.WithLogger(cfg.Logger),
-	}
-	if cfg.ZoneFile != "" {
-		dnsOptions = append(dnsOptions, xip.WithZoneFile(cfg.ZoneFile))
-	}
-	dnsServer, err := xip.NewXip(dnsOptions...)
+	)
 	if err != nil {
 		return nil, fmt.Errorf("DNS server: %w", err)
 	}

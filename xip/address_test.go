@@ -254,11 +254,7 @@ func TestAddressInLabelsBelowTheApexOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			address := startTestServer(t,
-				WithDomain(tt.domain),
-				WithEmail("admin@example.test"),
-				WithNameServers([]string{"192.0.2.10"}),
-			)
+			address := startTestServer(t, WithDomain(tt.domain), withTestZone(t, ""))
 			resp := queryTestServer(t, address, tt.qname, dns.TypeA)
 			if tt.want == "" {
 				if len(resp.Answer) != 0 {

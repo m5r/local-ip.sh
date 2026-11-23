@@ -27,15 +27,10 @@ func expectNoData(t *testing.T, resp *dns.Msg, apex string, ttl uint32) {
 	}
 }
 
-// startExampleServer serves the example configuration with the given zone file on a loopback socket.
+// startExampleServer serves the zone example.test from testZoneHead followed by zoneFileContent on a loopback socket.
 func startExampleServer(t *testing.T, zoneFileContent string) (*Xip, string) {
 	t.Helper()
-	xip, err := NewXip(
-		WithDomain(exampleDomain),
-		WithEmail(exampleEmail),
-		WithNameServers(exampleNameServers),
-		WithZoneFile(writeZoneFile(t, zoneFileContent)),
-	)
+	xip, err := NewXip(WithDomain(exampleDomain), withTestZone(t, zoneFileContent))
 	if err != nil {
 		t.Fatalf("NewXip: %v", err)
 	}
@@ -344,8 +339,8 @@ func TestAnswersWithoutDelegations(t *testing.T) {
 		exchangeAndCheck(t, address, ask(exampleApex, dns.TypeTXT), positive(`{q} 300 IN TXT "only"`))
 		exchangeAndCheck(t, address, ask("www.example.test.", dns.TypeA), positive("{q} 300 IN A 192.0.2.80"))
 	})
-	t.Run("a server without a zone file has no TXT record at its apex", func(t *testing.T) {
-		address := startTestServer(t, WithDomain(exampleDomain), WithEmail(exampleEmail), WithNameServers(exampleNameServers))
+	t.Run("a zone file without a TXT record at the apex has none", func(t *testing.T) {
+		address := startTestServer(t, WithDomain(exampleDomain), withTestZone(t, ""))
 		exchangeAndCheck(t, address, ask(exampleApex, dns.TypeTXT), noData)
 	})
 }

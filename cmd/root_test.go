@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,7 +14,7 @@ import (
 )
 
 // optionVariables are cleared for every test, so that what the shell running the tests exports cannot change their outcome.
-var optionVariables = []string{"XIP_ACME_DIRECTORY", "XIP_DOMAIN", "XIP_EMAIL", "XIP_NAMESERVERS", "XIP_STATE_DIR", "XIP_ZONE_FILE", "XIP_DNS_PORT", "XIP_HTTP_PORT", "XIP_HTTPS_PORT", "FLY_APP_NAME", "FLY_REGION"}
+var optionVariables = []string{"XIP_ACME_DIRECTORY", "XIP_DOMAIN", "XIP_EMAIL", "XIP_STATE_DIR", "XIP_ZONE_FILE", "XIP_DNS_PORT", "XIP_HTTP_PORT", "XIP_HTTPS_PORT", "FLY_APP_NAME", "FLY_REGION"}
 
 // setUp gives the test a fresh viper with the flags bound and the environment loaded, as Run does, and the command whose flags the test may set.
 func setUp(t *testing.T, environment map[string]string) *cobra.Command {
@@ -32,6 +34,17 @@ func setUp(t *testing.T, environment map[string]string) *cobra.Command {
 	}
 	loadEnvironment()
 	return command
+}
+
+// writeZoneFile writes a zone file for example.com with the records every zone needs and returns its path.
+func writeZoneFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "example.com.zone")
+	content := "@ 3600 SOA ns1 admin 1 900 900 1800 3600\n@ 3600 NS ns1\nns1 3600 A 192.0.2.1\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func mustConfig(t *testing.T) app.Config {
@@ -76,7 +89,7 @@ func TestConfigACMEDirectory(t *testing.T) {
 			"XIP_ACME_DIRECTORY": "http://ca.example/dir",
 			"XIP_DOMAIN":         "example.com",
 			"XIP_EMAIL":          "admin@example.com",
-			"XIP_NAMESERVERS":    "192.0.2.1",
+			"XIP_ZONE_FILE":      writeZoneFile(t),
 			"XIP_STATE_DIR":      t.TempDir(),
 			"XIP_DNS_PORT":       "0",
 			"XIP_HTTP_PORT":      "0",
@@ -86,6 +99,43 @@ func TestConfigACMEDirectory(t *testing.T) {
 			t.Fatal("app.New accepted an http directory URL")
 		} else if !strings.Contains(err.Error(), `directory URL "http://ca.example/dir" is not an absolute https URL`) {
 			t.Errorf("the error %q is not the refusal of a directory URL that is not https", err)
+		}
+	})
+}
+
+func TestConfigZoneFile(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		path := writeZoneFile(t)
+		setUp(t, map[string]string{"XIP_ZONE_FILE": path})
+		if got := mustConfig(t).ZoneFile; got != path {
+			t.Errorf("ZoneFile is %q, want %q", got, path)
+		}
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		path := writeZoneFile(t)
+		command := setUp(t, nil)
+		if err := command.Flags().Set("zone-file", path); err != nil {
+			t.Fatal(err)
+		}
+		if got := mustConfig(t).ZoneFile; got != path {
+			t.Errorf("ZoneFile is %q, want %q", got, path)
+		}
+	})
+
+	// The option is passed on as it is, so the refusal of a start without a zone file is the DNS server's, which app.New reports before it binds any socket.
+	t.Run("missing", func(t *testing.T) {
+		setUp(t, map[string]string{
+			"XIP_DOMAIN":     "example.com",
+			"XIP_STATE_DIR":  t.TempDir(),
+			"XIP_DNS_PORT":   "0",
+			"XIP_HTTP_PORT":  "0",
+			"XIP_HTTPS_PORT": "0",
+		})
+		if _, err := app.New(mustConfig(t)); err == nil {
+			t.Fatal("app.New started without a zone file")
+		} else if !strings.Contains(err.Error(), "a zone file is required") {
+			t.Errorf("the error %q is not the refusal of a start without a zone file", err)
 		}
 	})
 }

@@ -67,7 +67,7 @@ func shutdownContext() (context.Context, context.CancelFunc) {
 	return ctx, stop
 }
 
-// config turns the options into an app.Config. It parses each option into its type and fails on a value that does not parse; what a value means (a valid domain, email or name server) is checked by the packages that depend on it.
+// config turns the options into an app.Config. It parses each option into its type and fails on a value that does not parse; what a value means (a valid domain, email or zone file) is checked by the packages that depend on it.
 func config() (app.Config, error) {
 	// Fly only delivers UDP to a socket bound to fly-global-services, and TCP to a socket on any interface.
 	dnsUDPHost := ""
@@ -84,15 +84,9 @@ func config() (app.Config, error) {
 		ports[name] = port
 	}
 
-	var nameServers []string
-	if list := viper.GetString("nameservers"); list != "" {
-		nameServers = strings.Split(list, ",")
-	}
-
 	return app.Config{
 		Domain:        viper.GetString("domain"),
 		Email:         viper.GetString("email"),
-		NameServers:   nameServers,
 		ZoneFile:      viper.GetString("zone-file"),
 		DNSUDPAddress: net.JoinHostPort(dnsUDPHost, ports["dns-port"]),
 		DNSTCPAddress: ":" + ports["dns-port"],
@@ -141,9 +135,8 @@ func defineFlags(cmd *cobra.Command) error {
 	flags.String("http-port", "80", "Port for the HTTP server")
 	flags.String("https-port", "443", "Port for the HTTPS server")
 	flags.String("domain", "", "Root domain (required)")
-	flags.String("email", "", "ACME account email address (required)")
-	flags.String("nameservers", "", "List of nameservers separated by commas (required)")
-	flags.String("zone-file", "", "Path to a zone file declaring delegations (optional)")
+	flags.String("email", "", "ACME account email address (optional)")
+	flags.String("zone-file", "", "Path to the zone file, whose origin is the root domain (required)")
 	flags.String("state-dir", "./state", "Directory for the ACME account and the certificates")
 	flags.String("acme-directory", certs.LetsEncryptProduction, "HTTPS URL of the ACME directory of the certificate authority")
 	flags.String("acme-profile", "", "ACME certificate profile to request (optional, the certificate authority chooses by default)")

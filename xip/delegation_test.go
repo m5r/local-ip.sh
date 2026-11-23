@@ -12,13 +12,19 @@ import (
 	"github.com/miekg/dns"
 )
 
-func writeZoneFile(t *testing.T, content string) string {
+func writeZoneFile(t testing.TB, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.zone")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// withTestZone writes a zone file of testZoneHead followed by content and returns the option that loads it.
+func withTestZone(t testing.TB, content string) Option {
+	t.Helper()
+	return WithZoneFile(writeZoneFile(t, testZoneHead+content))
 }
 
 func expectReferral(t *testing.T, resp *dns.Msg) {
@@ -76,17 +82,14 @@ func expectDashedAnswer(t *testing.T, resp *dns.Msg) {
 }
 
 func TestReferrals(t *testing.T) {
-	zoneFile := writeZoneFile(t, `; sub is served elsewhere
+	address := startTestServer(t,
+		WithDomain("example.test"),
+		withTestZone(t, `; sub is served elsewhere
 sub NS ns1.sub
 sub NS ns.other.test.
 ns1.sub A 192.0.2.1
 ns1.sub AAAA 2001:db8::1
-`)
-	address := startTestServer(t,
-		WithDomain("example.test"),
-		WithEmail("admin@example.test"),
-		WithNameServers([]string{"192.0.2.10", "192.0.2.11"}),
-		WithZoneFile(zoneFile),
+`),
 	)
 
 	tests := []struct {
@@ -132,19 +135,18 @@ func TestNewXipRejectsBadZoneFile(t *testing.T) {
 		},
 		{
 			name:     "invalid file",
-			zoneFile: func(t *testing.T) string { return writeZoneFile(t, "sub PTR other.test.\n") },
+			zoneFile: func(t *testing.T) string { return writeZoneFile(t, testZoneHead+"sub PTR other.test.\n") },
+		},
+		{
+			name:     "file without an SOA record",
+			zoneFile: func(t *testing.T) string { return writeZoneFile(t, "@ NS ns.other.test.\n") },
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := tt.zoneFile(t)
-			xip, err := NewXip(
-				WithDomain("bad-zone-file.test"),
-				WithEmail("admin@bad-zone-file.test"),
-				WithNameServers([]string{"192.0.2.10"}),
-				WithZoneFile(path),
-			)
+			xip, err := NewXip(WithDomain("bad-zone-file.test"), WithZoneFile(path))
 			if err == nil {
 				t.Fatal("NewXip succeeded, want an error")
 			}
@@ -158,31 +160,28 @@ func TestNewXipRejectsBadZoneFile(t *testing.T) {
 	}
 }
 
-func TestNewXipWithoutZoneFile(t *testing.T) {
-	address := startTestServer(t,
-		WithDomain("no-zone-file.test"),
-		WithEmail("admin@no-zone-file.test"),
-		WithNameServers([]string{"192.0.2.10"}),
-	)
+func TestNewXipRequiresZoneFile(t *testing.T) {
+	xip, err := NewXip(WithDomain("no-zone-file.test"))
+	if want := "xip: a zone file is required"; err == nil || err.Error() != want {
+		t.Errorf("NewXip error = %v, want %q", err, want)
+	}
+	if xip != nil {
+		t.Error("NewXip returned a server together with an error")
+	}
+}
 
-	expectDashedAnswer(t, queryTestServer(t, address, "10-0-0-1.sub.no-zone-file.test.", dns.TypeA))
+func TestZoneFileWithoutDelegations(t *testing.T) {
+	address := startTestServer(t, WithDomain("no-delegation.test"), withTestZone(t, ""))
+
+	expectDashedAnswer(t, queryTestServer(t, address, "10-0-0-1.sub.no-delegation.test.", dns.TypeA))
 }
 
 // TestFailedNewXipLeavesRunningInstanceAnswering shows that building an instance touches nothing an instance already serving the same domain answers from.
 func TestFailedNewXipLeavesRunningInstanceAnswering(t *testing.T) {
 	const domain = "kept-registration.test"
-	address := startTestServer(t,
-		WithDomain(domain),
-		WithEmail("admin@"+domain),
-		WithNameServers([]string{"192.0.2.10"}),
-	)
+	address := startTestServer(t, WithDomain(domain), withTestZone(t, ""))
 
-	_, err := NewXip(
-		WithDomain(domain),
-		WithEmail("admin@"+domain),
-		WithNameServers([]string{"192.0.2.99"}),
-		WithZoneFile(writeZoneFile(t, "sub NS ns1.sub\n")),
-	)
+	_, err := NewXip(WithDomain(domain), withTestZone(t, "ns1 3600 A 192.0.2.99\nsub NS ns1.sub\n"))
 	if err == nil {
 		t.Fatal("NewXip succeeded with an invalid zone file, want an error")
 	}
@@ -199,13 +198,7 @@ func TestFailedNewXipLeavesRunningInstanceAnswering(t *testing.T) {
 // TestConcurrentReferrals serves many referrals at once from the same stored records, so the race
 // detector sees any write to them or to a backing array shared between responses.
 func TestConcurrentReferrals(t *testing.T) {
-	zoneFile := writeZoneFile(t, "sub NS ns1.sub\nns1.sub A 192.0.2.1\n")
-	address := startTestServer(t,
-		WithDomain("concurrent.test"),
-		WithEmail("admin@concurrent.test"),
-		WithNameServers([]string{"192.0.2.10"}),
-		WithZoneFile(zoneFile),
-	)
+	address := startTestServer(t, WithDomain("concurrent.test"), withTestZone(t, "sub NS ns1.sub\nns1.sub A 192.0.2.1\n"))
 
 	const queries = 32
 	errs := make(chan error, queries)
@@ -234,12 +227,7 @@ func TestConcurrentReferrals(t *testing.T) {
 
 // TestReferralDoesNotShareStoredRecords guards the stored delegation: replies are packed concurrently, so a reply that held a stored record or shared a backing array with the stored slices could let one reply change what another sends.
 func TestReferralDoesNotShareStoredRecords(t *testing.T) {
-	xip, err := NewXip(
-		WithDomain("shared-slices.test"),
-		WithEmail("admin@shared-slices.test"),
-		WithNameServers([]string{"192.0.2.10"}),
-		WithZoneFile(writeZoneFile(t, "sub NS ns1.sub\nns1.sub A 192.0.2.1\n")),
-	)
+	xip, err := NewXip(WithDomain("shared-slices.test"), withTestZone(t, "sub NS ns1.sub\nns1.sub A 192.0.2.1\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +240,7 @@ func TestReferralDoesNotShareStoredRecords(t *testing.T) {
 	if message == nil || len(message.Ns) != 1 || len(message.Extra) != 1 {
 		t.Fatalf("not the expected referral:\n%s", message)
 	}
-	if &message.Ns[0] == &stored.nameServers[0] || message.Ns[0] == stored.nameServers[0] {
+	if &message.Ns[0] == &stored.nsRecords[0] || message.Ns[0] == stored.nsRecords[0] {
 		t.Error("the authority section shares the stored name server record or its backing array")
 	}
 	if &message.Extra[0] == &stored.glue[0] || message.Extra[0] == stored.glue[0] {
@@ -261,12 +249,7 @@ func TestReferralDoesNotShareStoredRecords(t *testing.T) {
 }
 
 func TestReferralForCutSpelledWithEscapes(t *testing.T) {
-	address := startTestServer(t,
-		WithDomain("escaped-cut.test"),
-		WithEmail("admin@escaped-cut.test"),
-		WithNameServers([]string{"192.0.2.10"}),
-		WithZoneFile(writeZoneFile(t, `\115ub NS ns1.\115ub`+"\n"+`ns1.sub A 192.0.2.1`+"\n")),
-	)
+	address := startTestServer(t, WithDomain("escaped-cut.test"), withTestZone(t, `\115ub NS ns1.\115ub`+"\n"+`ns1.sub A 192.0.2.1`+"\n"))
 
 	for _, qname := range []string{"sub.escaped-cut.test.", "www.SUB.escaped-cut.test."} {
 		t.Run(qname, func(t *testing.T) {
@@ -280,13 +263,8 @@ func TestReferralForCutSpelledWithEscapes(t *testing.T) {
 }
 
 func TestNewXipRejectsGlueAtOwnAddress(t *testing.T) {
-	path := writeZoneFile(t, "sub NS ns1.sub\nns1.sub A 192.0.2.11\n")
-	_, err := NewXip(
-		WithDomain("own-address.test"),
-		WithEmail("admin@own-address.test"),
-		WithNameServers([]string{"192.0.2.10", "192.0.2.11"}),
-		WithZoneFile(path),
-	)
+	path := writeZoneFile(t, testZoneHead+"sub NS ns1.sub\nns1.sub A 192.0.2.11\n")
+	_, err := NewXip(WithDomain("own-address.test"), WithZoneFile(path))
 	if err == nil {
 		t.Fatal("NewXip succeeded with glue pointing back at its own name server, want an error")
 	}

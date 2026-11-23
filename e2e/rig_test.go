@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 const (
@@ -282,7 +284,7 @@ func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error)
 // waitIssued waits until the server serves both certificates of its first start.
 func waitIssued(t *testing.T, tg *target) {
 	t.Helper()
-	endpoint := netip.AddrPortFrom(tg.nameServers[0], 443)
+	endpoint := netip.AddrPortFrom(tg.webAddresses[0], 443)
 	deadline := time.Now().Add(issuanceWaitLimit)
 	var logged string
 	for {
@@ -365,7 +367,7 @@ func TestRig(t *testing.T) {
 	}
 
 	// The server starts only once Pebble answers: an order that fails at the start would put off the next attempt by five minutes.
-	logStep(t, "building and starting the server at %v", tg.nameServers)
+	logStep(t, "building and starting the server, with the name server at %v and the website at %v", tg.dnsServers, tg.webAddresses)
 	if _, err := r.compose(ctx, dockerUpTimeout, "up", "--detach", "--build", rigServer); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +404,6 @@ const capturedRigConfig = `{
         "XIP_ACME_PROFILE": "default",
         "XIP_DOMAIN": "local-ip.test",
         "XIP_EMAIL": "admin@local-ip.test",
-        "XIP_NAMESERVERS": "10.253.53.53",
         "XIP_ZONE_FILE": "/etc/local-ip.zone"
       },
       "networks": {"rig": {"ipv4_address": "10.253.53.53"}},
@@ -472,17 +473,126 @@ func TestParseRigConfig(t *testing.T) {
 	if tg.domain != "local-ip.test" {
 		t.Errorf("domain = %q, want local-ip.test", tg.domain)
 	}
-	if want := []netip.Addr{netip.MustParseAddr("10.253.53.53")}; !slices.Equal(tg.nameServers, want) {
-		t.Errorf("nameServers = %v, want %v", tg.nameServers, want)
+	want := []netip.Addr{netip.MustParseAddr("10.253.53.53")}
+	if !slices.Equal(tg.dnsServers, want) {
+		t.Errorf("dnsServers = %v, want %v", tg.dnsServers, want)
+	}
+	if !slices.Equal(tg.webAddresses, want) {
+		t.Errorf("webAddresses = %v, want %v", tg.webAddresses, want)
 	}
 	if tg.publiclyDelegated {
 		t.Error("publiclyDelegated = true, want false")
 	}
-	if got, want := tg.soaRname(), "admin.local-ip.test."; got != want {
-		t.Errorf("soaRname = %q, want %q", got, want)
+	assertRecords(t, "SOA", []dns.RR{tg.soa}, []string{`local-ip.test. 1800 IN SOA dns-a.local-ip.test. hostmaster.local-ip.test. 2026112301 7200 600 86400 120`})
+	assertRecords(t, "apex NS", tg.apexNS.records, []string{`local-ip.test. 7200 IN NS dns-a.local-ip.test.`})
+	assertRecords(t, "apex NS additional", tg.apexNSAdditional, []string{`dns-a.local-ip.test. 1200 IN A 10.253.53.53`, `dns-a.local-ip.test. 1200 IN AAAA 2001:db8:53::53`})
+	if len(tg.delegations) != 1 || len(tg.recordSets) != 14 {
+		t.Errorf("%d delegations and %d record sets, want the 1 and 14 of rig/zone", len(tg.delegations), len(tg.recordSets))
 	}
-	if len(tg.delegations) != 1 || len(tg.recordSets) != 10 {
-		t.Errorf("%d delegations and %d record sets, want the 1 and 10 of rig/zone", len(tg.delegations), len(tg.recordSets))
+}
+
+// rigReply is the reply of a name server to qname and qtype that carries the records given, through a wire round trip.
+func rigReply(t *testing.T, qname string, qtype uint16, answer, additional []dns.RR) *dns.Msg {
+	t.Helper()
+	reply := new(dns.Msg)
+	reply.SetQuestion(qname, qtype)
+	reply.Response = true
+	reply.Authoritative = true
+	for _, rr := range answer {
+		reply.Answer = append(reply.Answer, dns.Copy(rr))
+	}
+	for _, rr := range additional {
+		reply.Extra = append(reply.Extra, dns.Copy(rr))
+	}
+	packed, err := reply.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := new(dns.Msg)
+	if err := resp.Unpack(packed); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// TestRigApexChecksReadTheZoneFile holds the checks at the apex to the rig's zone file: the answers the file describes pass them, and each fails them for the target of a copy of the file with one value changed, while the other checks still pass.
+func TestRigApexChecksReadTheZoneFile(t *testing.T) {
+	rigTarget := capturedRigTarget(t)
+	zone := rigTarget.zone()
+	apexA, ok := rigTarget.recordSet(zone, dns.TypeA)
+	if !ok {
+		t.Fatal("rig/zone declares no A record at the apex")
+	}
+	soaReply := rigReply(t, zone, dns.TypeSOA, []dns.RR{rigTarget.soa}, nil)
+	nsReply := rigReply(t, zone, dns.TypeNS, rigTarget.apexNS.records, rigTarget.apexNSAdditional)
+	aReply := rigReply(t, zone, dns.TypeA, apexA.records, nil)
+	checks := []struct {
+		name  string
+		check func(tg *target) error
+	}{
+		{name: "apex SOA", check: func(tg *target) error { return checkApexSOA(tg, soaReply) }},
+		{name: "apex NS", check: func(tg *target) error { return checkApexNS(tg, nsReply) }},
+		{name: "apex A", check: func(tg *target) error {
+			set, _ := tg.recordSet(tg.zone(), dns.TypeA)
+			return checkRecordSet(set, aReply)
+		}},
+	}
+	for _, c := range checks {
+		if err := c.check(rigTarget); err != nil {
+			t.Errorf("%s rejects the answer rig/zone describes: %v", c.name, err)
+		}
+	}
+
+	content, err := os.ReadFile(filepath.Join("rig", "zone"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := []struct {
+		value    string
+		old, new string
+		failing  string
+	}{
+		{value: "the SOA TTL", old: "@     1800  SOA", new: "@     1801  SOA", failing: "apex SOA"},
+		{value: "the SOA MNAME", old: "SOA   dns-a hostmaster", new: "SOA   dns-b hostmaster", failing: "apex SOA"},
+		{value: "the SOA RNAME", old: "dns-a hostmaster", new: "dns-a admin", failing: "apex SOA"},
+		{value: "the SOA serial", old: "2026112301", new: "2026112302", failing: "apex SOA"},
+		{value: "the SOA MINIMUM", old: "86400 120", new: "86400 121", failing: "apex SOA"},
+		{value: "the apex NS TTL", old: "@     7200  NS", new: "@     7201  NS", failing: "apex NS"},
+		{value: "the name server's A TTL", old: "dns-a 1200  A ", new: "dns-a 1201  A ", failing: "apex NS"},
+		{value: "the name server's AAAA address", old: "2001:db8:53::53", new: "2001:db8:53::54", failing: "apex NS"},
+		{value: "the apex A TTL", old: "@     600   A", new: "@     601   A", failing: "apex A"},
+	}
+	for _, change := range changes {
+		t.Run(change.value, func(t *testing.T) {
+			if n := strings.Count(string(content), change.old); n != 1 {
+				t.Fatalf("rig/zone holds %q %d times, want once", change.old, n)
+			}
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "zone"), []byte(strings.Replace(string(content), change.old, change.new, 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			quoted, err := json.Marshal(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := parseRigConfig([]byte(strings.ReplaceAll(capturedRigConfig, "RIG_DIR", string(quoted[1:len(quoted)-1]))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed, err := cfg.target("compose.yml", x509.NewCertPool())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range checks {
+				err := c.check(changed)
+				if c.name == change.failing && err == nil {
+					t.Errorf("%s accepts the answer rig/zone describes for a zone file with another value of %s", c.name, change.value)
+				}
+				if c.name != change.failing && err != nil {
+					t.Errorf("%s rejects the answer rig/zone describes for a zone file that changes only %s: %v", c.name, change.value, err)
+				}
+			}
+		})
 	}
 }
 

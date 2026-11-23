@@ -9,7 +9,6 @@ kill_timeout = "5s"
 XIP_DOMAIN = "local-ip.sh"
 XIP_EMAIL = "admin@local-ip.sh"
 XIP_ZONE_FILE = "/etc/local-ip.zone"
-XIP_NAMESERVERS = "137.66.40.11,137.66.40.12" # fly.io edge-only ip addresses, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329
 
 [mounts]
 # The volume keeps the name it was created with, when lego managed the certificates.

@@ -474,22 +474,8 @@ func expectA(want netip.Addr) func(*testing.T, *dns.Msg) {
 	}
 }
 
-func expectASet(want []netip.Addr) func(*testing.T, *dns.Msg) {
-	return func(t *testing.T, resp *dns.Msg) {
-		t.Helper()
-		records, err := recordsOfType[*dns.A](resp.Answer, resp.Question[0].Name, dns.TypeA)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := slices.SortedFunc(slices.Values(aAddrs(records)), netip.Addr.Compare)
-		wantSorted := slices.SortedFunc(slices.Values(want), netip.Addr.Compare)
-		if len(got) != len(records) || !slices.Equal(got, wantSorted) {
-			t.Errorf("A answers = %v, want %v (any order)", got, wantSorted)
-		}
-	}
-}
-
-func expectNS(hosts []string, glue []netip.Addr) func(*testing.T, *dns.Msg) {
+// expectNS checks the NS targets of an answer through a resolver, in any order; whether a resolver adds the name servers' addresses is its own choice, so the other sections are not held to anything.
+func expectNS(hosts []string) func(*testing.T, *dns.Msg) {
 	return func(t *testing.T, resp *dns.Msg) {
 		t.Helper()
 		records, err := recordsOfType[*dns.NS](resp.Answer, resp.Question[0].Name, dns.TypeNS)
@@ -498,35 +484,12 @@ func expectNS(hosts []string, glue []netip.Addr) func(*testing.T, *dns.Msg) {
 		}
 		got := make([]string, len(records))
 		for i, record := range records {
-			got[i] = strings.ToLower(record.Ns)
+			got[i] = dns.CanonicalName(record.Ns)
 		}
 		slices.Sort(got)
-		want := make([]string, len(hosts))
-		for i, host := range hosts {
-			want[i] = strings.ToLower(host)
-		}
-		slices.Sort(want)
+		want := slices.Sorted(slices.Values(hosts))
 		if !slices.Equal(got, want) {
 			t.Errorf("NS targets = %v, want %v (any order)", got, want)
-		}
-
-		if glue == nil {
-			return
-		}
-		for i, host := range hosts {
-			found := false
-			for _, rr := range resp.Extra {
-				a, ok := rr.(*dns.A)
-				if !ok || a.Hdr.Class != dns.ClassINET || !strings.EqualFold(a.Hdr.Name, host) {
-					continue
-				}
-				if addr, ok := netip.AddrFromSlice(a.A); ok && addr.Unmap() == glue[i] {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("additional section has no A record %s for %s", glue[i], host)
-			}
 		}
 	}
 }
@@ -551,7 +514,7 @@ func checkNameError(zoneSOA *dns.SOA, resp *dns.Msg) error {
 	return checkNegative(zoneSOA, resp, dns.RcodeNameError)
 }
 
-// checkNegative compares the SOA record of a negative answer with zoneSOA, the record the same name server gives for the zone's SOA question: RFC 2308 section 3 asks for that record with a TTL of the smaller of its own TTL and its MINIMUM field, so the check holds the reply to the server's own data instead of to constants of its code.
+// checkNegative compares the SOA record of a negative answer with zoneSOA, the zone file's SOA record: RFC 2308 section 3 asks for that record with a TTL of the smaller of its own TTL and its MINIMUM field.
 func checkNegative(zoneSOA *dns.SOA, resp *dns.Msg, rcode int) error {
 	if resp.Rcode != rcode {
 		return fmt.Errorf("rcode = %s, want %s", dns.RcodeToString[resp.Rcode], dns.RcodeToString[rcode])
@@ -589,66 +552,56 @@ func soaFields(soa *dns.SOA) string {
 	return fmt.Sprintf("MNAME %s, RNAME %s, serial %d, refresh %d, retry %d, expire %d, minimum %d", soa.Ns, soa.Mbox, soa.Serial, soa.Refresh, soa.Retry, soa.Expire, soa.Minttl)
 }
 
-// zoneSOA asks a name server for the zone's SOA record, which its negative answers must carry.
-func zoneSOA(t *testing.T, server netip.Addr, tg *target) (*dns.SOA, error) {
-	t.Helper()
-	resp, err := exchange(t, server, dnsQuery{name: tg.zone(), qtype: dns.TypeSOA, qclass: dns.ClassINET})
-	if err != nil {
-		return nil, err
-	}
-	soa, err := referenceSOA(tg, resp)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", server, err)
-	}
-	return soa, nil
-}
-
-// referenceSOA takes the record the negative answers are compared with from a name server's reply to the zone's SOA question, after holding that reply to everything the "apex SOA" case requires: otherwise the negative answers could be held to a record with another MNAME or RNAME than the target's, or to one from a reply that is not a proper authoritative answer.
-func referenceSOA(tg *target, resp *dns.Msg) (*dns.SOA, error) {
-	if err := checkReplyOnPath(dnsCase{authoritative: true}, toNameServer, resp); err != nil {
-		return nil, fmt.Errorf("reply to %s SOA: %w", tg.zone(), err)
-	}
-	return apexSOA(tg, resp)
-}
-
-// apexSOA holds an answer to the zone's SOA question to the target and returns its SOA record; the numbers of the record are the server's own and are not pinned.
-func apexSOA(tg *target, resp *dns.Msg) (*dns.SOA, error) {
+// checkApexSOA holds an answer to the zone's SOA question to the zone file's SOA record, every field and the TTL.
+func checkApexSOA(tg *target, resp *dns.Msg) error {
 	zone := tg.zone()
 	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("answered %s for %s SOA, want NOERROR", dns.RcodeToString[resp.Rcode], zone)
+		return fmt.Errorf("answered %s for %s SOA, want NOERROR", dns.RcodeToString[resp.Rcode], zone)
 	}
 	records, err := recordsOfType[*dns.SOA](resp.Answer, zone, dns.TypeSOA)
 	if err != nil {
-		return nil, fmt.Errorf("answer for %s SOA: %w", zone, err)
+		return fmt.Errorf("answer for %s SOA: %w", zone, err)
 	}
 	if len(records) != 1 {
-		return nil, fmt.Errorf("returned %d SOA records for %s, want exactly 1", len(records), zone)
+		return fmt.Errorf("returned %d SOA records for %s, want exactly 1", len(records), zone)
 	}
-	soa := records[0]
-	if want := tg.nameServerHosts()[0]; !strings.EqualFold(soa.Ns, want) {
-		return nil, fmt.Errorf("SOA MNAME = %q, want %q", soa.Ns, want)
+	if err := sameRecord(records[0], tg.soa); err != nil {
+		return fmt.Errorf("SOA record of the answer: %w", err)
 	}
-	if soa.Mbox != tg.soaRname() {
-		return nil, fmt.Errorf("SOA RNAME = %q, want %q", soa.Mbox, tg.soaRname())
+	return nil
+}
+
+// sameRecord holds a record of a reply to the declared one: type, class IN, owner in any case, TTL and every field of the RDATA.
+func sameRecord(rr, declared dns.RR) error {
+	hdr, want := rr.Header(), declared.Header()
+	if hdr.Rrtype != want.Rrtype {
+		return fmt.Errorf("record %q is not of type %s", rr, dns.Type(want.Rrtype))
 	}
-	return soa, nil
+	if hdr.Class != dns.ClassINET {
+		return fmt.Errorf("record %q has class %s, want IN", rr, dns.Class(hdr.Class))
+	}
+	if !strings.EqualFold(hdr.Name, want.Name) {
+		return fmt.Errorf("record %q is owned by %q, want %q", rr, hdr.Name, want.Name)
+	}
+	if hdr.Ttl != want.Ttl {
+		return fmt.Errorf("record %q has TTL %d, want the declared %d", rr, hdr.Ttl, want.Ttl)
+	}
+	got, err := rdataFields(rr)
+	if err != nil {
+		return err
+	}
+	wantFields, err := rdataFields(declared)
+	if err != nil {
+		return fmt.Errorf("declared record: %w", err)
+	}
+	if got != wantFields {
+		return fmt.Errorf("record has %s, want the declared %s", got, wantFields)
+	}
+	return nil
 }
 
 func expectApexSOA(tg *target) func(*testing.T, *dns.Msg) {
-	return asCheck(func(resp *dns.Msg) error {
-		_, err := apexSOA(tg, resp)
-		return err
-	})
-}
-
-// requireZoneSOA gives the cases of one name server the SOA record their negative answers are compared with, and ends that name server's run when it cannot.
-func requireZoneSOA(t *testing.T, server netip.Addr, tg *target) *dns.SOA {
-	t.Helper()
-	soa, err := zoneSOA(t, server, tg)
-	if err != nil {
-		t.Fatalf("cannot check the negative answers of %s without its SOA record for %s: %v", server, tg.zone(), err)
-	}
-	return soa
+	return asCheck(func(resp *dns.Msg) error { return checkApexSOA(tg, resp) })
 }
 
 // checkRecordSet checks an answer that carries the declared record set, owned by the question name.
@@ -697,6 +650,21 @@ func checkPartOfRecordSet(set targetRecordSet, resp *dns.Msg) error {
 
 // answerAndDeclaredRDATA checks every answer record against the declared set's owner, type, class and a TTL that ttlOK accepts, requires the other sections empty, and returns the RDATA of the answer and of the declared set, each sorted.
 func answerAndDeclaredRDATA(set targetRecordSet, resp *dns.Msg, ttlOK func(uint32) bool) (got, want []string, err error) {
+	got, want, err = answerRDATA(set, resp, ttlOK)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(resp.Ns) != 0 {
+		return nil, nil, fmt.Errorf("authority section has %d records, want none", len(resp.Ns))
+	}
+	if len(resp.Extra) != 0 {
+		return nil, nil, fmt.Errorf("additional section has %d records, want none", len(resp.Extra))
+	}
+	return got, want, nil
+}
+
+// answerRDATA checks every answer record against the declared set's owner, type, class and a TTL that ttlOK accepts, and returns the RDATA of the answer and of the declared set, each sorted.
+func answerRDATA(set targetRecordSet, resp *dns.Msg, ttlOK func(uint32) bool) (got, want []string, err error) {
 	if len(resp.Question) != 1 {
 		return nil, nil, fmt.Errorf("question section has %d entries, want 1", len(resp.Question))
 	}
@@ -730,15 +698,36 @@ func answerAndDeclaredRDATA(set targetRecordSet, resp *dns.Msg, ttlOK func(uint3
 		}
 		want = append(want, fields)
 	}
-	if len(resp.Ns) != 0 {
-		return nil, nil, fmt.Errorf("authority section has %d records, want none", len(resp.Ns))
-	}
-	if len(resp.Extra) != 0 {
-		return nil, nil, fmt.Errorf("additional section has %d records, want none", len(resp.Extra))
-	}
 	slices.Sort(got)
 	slices.Sort(want)
 	return got, want, nil
+}
+
+// checkApexNS checks the answer to NS at the apex: the zone file's NS records of the apex in the answer, in any order, nothing in the authority section, and in the additional section exactly apexNSAdditional, in its order, so that a missing, an extra or a misplaced address shows.
+func checkApexNS(tg *target, resp *dns.Msg) error {
+	got, want, err := answerRDATA(tg.apexNS, resp, func(ttl uint32) bool { return ttl == tg.apexNS.ttl })
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("answer RDATA = %q, want %q (any order)", got, want)
+	}
+	if len(resp.Ns) != 0 {
+		return fmt.Errorf("authority section has %d records, want none", len(resp.Ns))
+	}
+	if len(resp.Extra) != len(tg.apexNSAdditional) {
+		return fmt.Errorf("additional section has %d records, want the %d address records of the name servers inside the zone, %q", len(resp.Extra), len(tg.apexNSAdditional), tg.apexNSAdditional)
+	}
+	for i, rr := range resp.Extra {
+		if err := sameRecord(rr, tg.apexNSAdditional[i]); err != nil {
+			return fmt.Errorf("additional record %d of %q: %w", i+1, tg.apexNSAdditional, err)
+		}
+	}
+	return nil
+}
+
+func expectApexNS(tg *target) func(*testing.T, *dns.Msg) {
+	return asCheck(func(resp *dns.Msg) error { return checkApexNS(tg, resp) })
 }
 
 // rdataFields spells the RDATA of a record field by field, names in canonical form, so that two records compare equal exactly when their data does.
@@ -762,15 +751,14 @@ func rdataFields(rr dns.RR) (string, error) {
 		return fmt.Sprintf("flag %d, tag %q, value %q", record.Flag, record.Tag, record.Value), nil
 	case *dns.NS:
 		return dns.CanonicalName(record.Ns), nil
+	case *dns.SOA:
+		return fmt.Sprintf("MNAME %s, RNAME %s, serial %d, refresh %d, retry %d, expire %d, minimum %d", dns.CanonicalName(record.Ns), dns.CanonicalName(record.Mbox), record.Serial, record.Refresh, record.Retry, record.Expire, record.Minttl), nil
 	}
 	return "", fmt.Errorf("record %q has a type the suite cannot compare", rr)
 }
 
-// The TTLs the server gives the records it builds: addressTTL to the address a name carries, recordTTL to the records built from its configuration, the SOA record among them, and to the SOA's MINIMUM field.
-const (
-	addressTTL uint32 = 86400
-	recordTTL  uint32 = 3600
-)
+// addressTTL is the TTL the server gives the address a name carries, the one record it computes from the name alone.
+const addressTTL uint32 = 86400
 
 // checkTTL requires an answer from a name server and holds every answer record to the TTL given: a name server gives each record the TTL it holds, where a resolver would count it down.
 func checkTTL(ttl uint32, resp *dns.Msg) error {
@@ -781,21 +769,6 @@ func checkTTL(ttl uint32, resp *dns.Msg) error {
 		if got := rr.Header().Ttl; got != ttl {
 			return fmt.Errorf("answer record %q has TTL %d, want %d", rr, got, ttl)
 		}
-	}
-	return nil
-}
-
-// checkSOAMinimum checks the MINIMUM field of the one SOA record that answers the zone's SOA question, which bounds the TTL of every negative answer.
-func checkSOAMinimum(minimum uint32, resp *dns.Msg) error {
-	if len(resp.Answer) != 1 {
-		return fmt.Errorf("answer section has %d records, want exactly one SOA record", len(resp.Answer))
-	}
-	soa, ok := resp.Answer[0].(*dns.SOA)
-	if !ok {
-		return fmt.Errorf("answer record %q is not an SOA record", resp.Answer[0])
-	}
-	if soa.Minttl != minimum {
-		return fmt.Errorf("SOA MINIMUM = %d, want %d", soa.Minttl, minimum)
 	}
 	return nil
 }
@@ -865,10 +838,6 @@ func expectTTL(ttl uint32) func(*testing.T, *dns.Msg) {
 	return asCheck(func(resp *dns.Msg) error { return checkTTL(ttl, resp) })
 }
 
-func expectSOAMinimum(minimum uint32) func(*testing.T, *dns.Msg) {
-	return asCheck(func(resp *dns.Msg) error { return checkSOAMinimum(minimum, resp) })
-}
-
 var (
 	expectHINFO     = asCheck(checkHINFO)
 	expectNoRecords = asCheck(checkNoRecords)
@@ -922,22 +891,21 @@ func randomLabel(t *testing.T) string {
 }
 
 func authoritativeAnswers(t *testing.T, tg *target) {
-	for _, server := range tg.nameServers {
+	for _, server := range tg.dnsServers {
 		t.Run(server.String(), func(t *testing.T) {
-			runDNSCases(t, server, toNameServer, authoritativeCases(tg, requireZoneSOA(t, server, tg)))
+			runDNSCases(t, server, toNameServer, authoritativeCases(tg))
 		})
 	}
 }
 
-// authoritativeCases are the cases every name server of the target must answer from its zone; zoneSOA is that name server's SOA record for the zone, which the negative answers are compared with when the checks run.
-func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
+// authoritativeCases are the cases every name server of the target must answer from its zone; the negative answers carry the zone file's SOA record.
+func authoritativeCases(tg *target) []dnsCase {
 	zone := tg.zone()
-	hosts := tg.nameServerHosts()
 	want := netip.MustParseAddr("10.11.12.13")
 	noError := []int{dns.RcodeSuccess}
 	refused := []int{dns.RcodeRefused}
 	nameError := []int{dns.RcodeNameError}
-	noData := expectNoData(zoneSOA)
+	noData := expectNoData(tg.soa)
 
 	cases := []dnsCase{
 		{name: "dashed", qname: "10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
@@ -954,29 +922,17 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		{name: "dashed after a name in the label AAAA", qname: "app-10-11-12-13." + zone, qtype: dns.TypeAAAA, rcodes: noError, authoritative: true, check: noData},
 		{name: "three numbers after a name in the label", qname: "app-10-11-12." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: noData},
 		{name: "leading zero", qname: "10-11-12-013." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: noData},
-		{name: "apex A", qname: zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectASet(tg.nameServers)},
-	}
-	for i, host := range hosts {
-		cases = append(cases, dnsCase{name: fmt.Sprintf("ns%d A", i+1), qname: host, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(tg.nameServers[i])})
 	}
 	cases = append(cases,
-		dnsCase{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, authoritative: true, check: expectNS(hosts, tg.nameServers)},
+		dnsCase{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, authoritative: true, check: expectApexNS(tg)},
+		dnsCase{name: "mixed case apex NS", qname: alternateCase(zone), qtype: dns.TypeNS, rcodes: noError, authoritative: true, check: expectApexNS(tg)},
 		dnsCase{name: "apex SOA", qname: zone, qtype: dns.TypeSOA, rcodes: noError, authoritative: true, check: expectApexSOA(tg)},
 		dnsCase{name: "CD flag", qname: zone, qtype: dns.TypeSOA, checkingDisabled: true, rcodes: noError, authoritative: true, check: expectApexSOA(tg)},
 		dnsCase{name: "dashed AAAA", qname: "10-11-12-13." + zone, qtype: dns.TypeAAAA, rcodes: noError, authoritative: true, check: noData},
 	)
-	// The TTLs have cases of their own, which requireZoneSOA does not check, so that a server that gives other TTLs fails these cases alone and every other case still runs.
+	// The TTL of the address a name carries has a case of its own, so that a server that gives another TTL fails this case alone and the address cases still run; the TTL of every declared record is checked with its record set.
 	cases = append(cases,
 		dnsCase{name: "dashed TTL", qname: "10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectTTL(addressTTL)},
-		dnsCase{name: "apex A TTL", qname: zone, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)},
-	)
-	for i, host := range hosts {
-		cases = append(cases, dnsCase{name: fmt.Sprintf("ns%d A TTL", i+1), qname: host, qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)})
-	}
-	cases = append(cases,
-		dnsCase{name: "apex NS TTL", qname: zone, qtype: dns.TypeNS, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)},
-		dnsCase{name: "apex SOA TTL", qname: zone, qtype: dns.TypeSOA, rcodes: noError, authoritative: true, check: expectTTL(recordTTL)},
-		dnsCase{name: "apex SOA MINIMUM", qname: zone, qtype: dns.TypeSOA, rcodes: noError, authoritative: true, check: expectSOAMinimum(recordTTL)},
 	)
 	for _, qtype := range []uint16{dns.TypeTXT, dns.TypeMX, dns.TypeCAA, dns.TypeHTTPS, dns.TypeDS, dns.TypeDNSKEY} {
 		cases = append(cases, dnsCase{name: "dashed " + dns.Type(qtype).String(), qname: "10-11-12-13." + zone, qtype: qtype, rcodes: noError, authoritative: true, check: noData})
@@ -992,8 +948,8 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		dnsCase{name: "unknown name TXT", qname: "nope." + zone, qtype: dns.TypeTXT, rcodes: noError, authoritative: true, check: noData},
 		dnsCase{name: "mixed case unknown name", qname: alternateCase("nope." + zone), qtype: dns.TypeA, rcodes: noError, authoritative: true, check: noData},
 		dnsCase{name: "longest name that can have a child", qname: nameOfWireLength(zone, 253), qtype: dns.TypeA, rcodes: noError, authoritative: true, check: noData},
-		dnsCase{name: "name of 254 octets is too long to have a child", qname: nameOfWireLength(zone, 254), qtype: dns.TypeA, rcodes: nameError, authoritative: true, check: expectNameError(zoneSOA)},
-		dnsCase{name: "name of 255 octets is too long to have a child", qname: nameOfWireLength(zone, 255), qtype: dns.TypeA, rcodes: nameError, authoritative: true, check: expectNameError(zoneSOA)},
+		dnsCase{name: "name of 254 octets is too long to have a child", qname: nameOfWireLength(zone, 254), qtype: dns.TypeA, rcodes: nameError, authoritative: true, check: expectNameError(tg.soa)},
+		dnsCase{name: "name of 255 octets is too long to have a child", qname: nameOfWireLength(zone, 255), qtype: dns.TypeA, rcodes: nameError, authoritative: true, check: expectNameError(tg.soa)},
 	)
 	for _, qtype := range []uint16{dns.TypeDS, dns.TypeDNSKEY, 65280} {
 		cases = append(cases, dnsCase{name: "apex " + dns.Type(qtype).String(), qname: zone, qtype: qtype, rcodes: noError, authoritative: true, check: noData})
@@ -1002,11 +958,9 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		dnsCase{name: "ANY at an address name", qname: "10-11-12-13." + zone, qtype: dns.TypeANY, rcodes: noError, authoritative: true, check: expectHINFO},
 		dnsCase{name: "ANY at the apex", qname: zone, qtype: dns.TypeANY, rcodes: noError, authoritative: true, check: expectHINFO},
 	)
-	cases = append(cases, declaredRecordCases(tg, zoneSOA)...)
+	cases = append(cases, declaredRecordCases(tg)...)
 	cases = append(cases,
 		dnsCase{name: "mixed case dashed with prefix", qname: alternateCase("app.10-11-12-13." + zone), qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(want)},
-		dnsCase{name: "mixed case apex A", qname: alternateCase(zone), qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectASet(tg.nameServers)},
-		dnsCase{name: "mixed case ns1 A", qname: alternateCase(hosts[0]), qtype: dns.TypeA, rcodes: noError, authoritative: true, check: expectA(tg.nameServers[0])},
 	)
 	unrelated, sibling := outsideNames(zone)
 	cases = append(cases,
@@ -1016,7 +970,7 @@ func authoritativeCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 		dnsCase{name: "zone transfer AXFR", qname: zone, qtype: dns.TypeAXFR, rcodes: refused, nonAuthoritative: true, check: expectNoRecords},
 		dnsCase{name: "zone transfer IXFR", qname: zone, qtype: dns.TypeIXFR, rcodes: refused, nonAuthoritative: true, check: expectNoRecords},
 	)
-	return append(cases, transportCases(tg, zoneSOA)...)
+	return append(cases, transportCases(tg)...)
 }
 
 // The zone file may declare a TXT set at each of these labels below the apex for the suite to verify truncation, EDNS and TCP with: every reply for the first is larger than 512 octets and smaller than serverUDPSize, every reply for the second is larger than serverUDPSize. checkTransportSets holds a declared set to that.
@@ -1027,16 +981,11 @@ const (
 
 // txtSetAt returns the TXT set the zone file declares at the label below the apex, if any.
 func (tg *target) txtSetAt(label string) (targetRecordSet, bool) {
-	owner := label + "." + tg.zone()
-	i := slices.IndexFunc(tg.recordSets, func(set targetRecordSet) bool { return set.owner == owner && set.rrtype == dns.TypeTXT })
-	if i < 0 {
-		return targetRecordSet{}, false
-	}
-	return tg.recordSets[i], true
+	return tg.recordSet(label+"."+tg.zone(), dns.TypeTXT)
 }
 
 // transportCases are the cases of every name server that depend on the transport and on EDNS; the cases for the large TXT sets exist only where the zone file declares them.
-func transportCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
+func transportCases(tg *target) []dnsCase {
 	zone := tg.zone()
 	noError := []int{dns.RcodeSuccess}
 	edns := ednsOPT{udpSize: serverUDPSize}
@@ -1044,7 +993,7 @@ func transportCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 	cases := []dnsCase{
 		{name: "address over TCP", qname: "10-11-12-13." + zone, qtype: dns.TypeA, tcp: true, rcodes: noError, authoritative: true, check: expectA(netip.MustParseAddr("10.11.12.13"))},
 		{name: "EDNS version 1 gets BADVERS", qname: zone, qtype: dns.TypeSOA, edns: ednsOPT{udpSize: serverUDPSize, version: 1}, rcodes: []int{dns.RcodeBadVers}, nonAuthoritative: true, check: expectNoRecords},
-		{name: "EDNS on NXDOMAIN", qname: nameOfWireLength(zone, 254), qtype: dns.TypeA, edns: edns, rcodes: []int{dns.RcodeNameError}, authoritative: true, check: expectNameError(zoneSOA)},
+		{name: "EDNS on NXDOMAIN", qname: nameOfWireLength(zone, 254), qtype: dns.TypeA, edns: edns, rcodes: []int{dns.RcodeNameError}, authoritative: true, check: expectNameError(tg.soa)},
 		{name: "EDNS on REFUSED", qname: unrelated, qtype: dns.TypeA, edns: edns, rcodes: []int{dns.RcodeRefused}, nonAuthoritative: true, check: expectNoRecords},
 	}
 	if set, ok := tg.txtSetAt(udpTXTLabel); ok {
@@ -1111,7 +1060,7 @@ func replySize(set targetRecordSet, compress, withOPT bool) (int, error) {
 }
 
 // declaredRecordCases asks for every record set the target's zone file declares, as written and in mixed case, and asks each name for a type it has none of. A CNAME is also asked for types it is not, which it answers in their place. A set may be too large for a reply without EDNS, so the cases that expect one follow truncation.
-func declaredRecordCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
+func declaredRecordCases(tg *target) []dnsCase {
 	noError := []int{dns.RcodeSuccess}
 	var cases []dnsCase
 	var ownersWithoutCNAME []string
@@ -1131,7 +1080,7 @@ func declaredRecordCases(tg *target, zoneSOA *dns.SOA) []dnsCase {
 	}
 	// HTTPS is a type the zone file cannot declare, so every declared name lacks it.
 	for _, owner := range ownersWithoutCNAME {
-		cases = append(cases, dnsCase{name: "declared name " + owner + " asked for HTTPS", qname: owner, qtype: dns.TypeHTTPS, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectNoData(zoneSOA)})
+		cases = append(cases, dnsCase{name: "declared name " + owner + " asked for HTTPS", qname: owner, qtype: dns.TypeHTTPS, rcodes: noError, authoritative: true, fromZoneFile: true, check: expectNoData(tg.soa)})
 	}
 	return cases
 }
@@ -1158,7 +1107,7 @@ func publicResolverCases(tg *target, label func() string) []dnsCase {
 		{name: "dashed with random prefix in the label", qname: label() + "-10-11-12-13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
 		// The resolver minimises the query name on its way and passes through 13.<zone>, 12.13.<zone> and 11.12.13.<zone>, where an NXDOMAIN would tell it that nothing exists below (RFC 8020).
 		{name: "dotted with random prefix", qname: label() + ".10.11.12.13." + zone, qtype: dns.TypeA, rcodes: noError, check: expectA(want)},
-		{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, check: expectNS(tg.nameServerHosts(), nil)},
+		{name: "apex NS", qname: zone, qtype: dns.TypeNS, rcodes: noError, check: expectNS(tg.apexNSTargets())},
 	}
 	// The resolver is asked over TCP so that its own limits on UDP cannot cut the set; whole sets show that it got them whole from a name server, over UDP with EDNS or over TCP after a truncated reply.
 	for _, txtLabel := range []string{udpTXTLabel, tcpTXTLabel} {
@@ -1209,7 +1158,7 @@ func checkProbes(tg *target) error {
 			return fmt.Errorf("the name %q the suite expects to be refused as outside the zone is inside %s", name, zone)
 		}
 	}
-	if err := checkProbeCases(tg, authoritativeCases(tg, nil)); err != nil {
+	if err := checkProbeCases(tg, authoritativeCases(tg)); err != nil {
 		return err
 	}
 	for _, host := range lanRoundTripHosts(tg.domain) {
@@ -1259,9 +1208,8 @@ func delegationChecks(t *testing.T, tg *target) {
 	}
 	noError := []int{dns.RcodeSuccess}
 
-	for _, server := range tg.nameServers {
+	for _, server := range tg.dnsServers {
 		t.Run(server.String(), func(t *testing.T) {
-			soa := requireZoneSOA(t, server, tg)
 			for i, d := range tg.delegations {
 				silent := false
 				t.Run(d.cut, func(t *testing.T) {
@@ -1273,7 +1221,7 @@ func delegationChecks(t *testing.T, tg *target) {
 						{name: "dashed A", qname: "10-11-12-13." + d.cut, qtype: dns.TypeA, rcodes: noError, nonAuthoritative: true, check: referral, checkTruncated: partOfReferral},
 						{name: "ACME challenge TXT", qname: "_acme-challenge." + d.cut, qtype: dns.TypeTXT, rcodes: noError, nonAuthoritative: true, check: referral, checkTruncated: partOfReferral},
 						// DS records belong to the parent, so this server answers for them from its own zone.
-						{name: "cut DS", qname: d.cut, qtype: dns.TypeDS, rcodes: noError, authoritative: true, check: expectNoData(soa)},
+						{name: "cut DS", qname: d.cut, qtype: dns.TypeDS, rcodes: noError, authoritative: true, check: expectNoData(tg.soa)},
 					}
 					notRun, wentSilent := runDNSCasesUntilSilent(t, server, toNameServer, cases)
 					if wentSilent {
@@ -1530,19 +1478,34 @@ func TestCheckNegativeReplies(t *testing.T) {
 	}
 }
 
-// testTarget is the target of the example zone, example.test with two name servers.
-func testTarget() *target {
+// testTarget is the target of the example zone, example.test, with the SOA record testSOA and three name servers: ns1 with two A records and an AAAA record, ns2 with one A record, and one outside the zone.
+func testTarget(t *testing.T) *target {
+	t.Helper()
+	soa, err := comparableRecord(mustRR(t, testSOA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var additional []dns.RR
+	for _, record := range []string{"ns1.example.test. 3600 IN A 192.0.2.10", "ns1.example.test. 3600 IN A 192.0.2.12", "ns1.example.test. 3600 IN AAAA 2001:db8::10", "ns2.example.test. 3600 IN A 192.0.2.11"} {
+		rr, err := comparableRecord(mustRR(t, record))
+		if err != nil {
+			t.Fatal(err)
+		}
+		additional = append(additional, rr)
+	}
 	return &target{
-		domain:      "example.test",
-		nameServers: []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")},
-		email:       "admin@example.test",
-		rname:       "admin.example.test.",
+		domain:           "example.test",
+		dnsServers:       []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.12"), netip.MustParseAddr("192.0.2.11")},
+		webAddresses:     []netip.Addr{netip.MustParseAddr("192.0.2.80")},
+		soa:              soa.(*dns.SOA),
+		apexNS:           testRecordSet(t, "example.test. 3600 IN NS ns1.example.test.", "example.test. 3600 IN NS ns2.example.test.", "example.test. 3600 IN NS ns.other.test."),
+		apexNSAdditional: additional,
 	}
 }
 
-func TestReferenceSOA(t *testing.T) {
-	soaOf := func(owner, mname, rname string) string {
-		return owner + " 300 IN SOA " + mname + " " + rname + " 2024072600 900 900 1800 300"
+func TestCheckApexSOA(t *testing.T) {
+	soaField := func(set func(*dns.SOA)) func(*dns.Msg) {
+		return func(resp *dns.Msg) { set(resp.Answer[0].(*dns.SOA)) }
 	}
 	tests := []struct {
 		name   string
@@ -1552,22 +1515,25 @@ func TestReferenceSOA(t *testing.T) {
 		mutate func(resp *dns.Msg)
 		ok     bool
 	}{
-		{name: "accepts the zone's SOA record", answer: []string{testSOA}, ok: true},
-		{name: "accepts a question in mixed case answered by its owner as asked", qname: "ExAmPlE.test.", answer: []string{soaOf("ExAmPlE.test.", "ns1.example.test.", "admin.example.test.")}, ok: true},
-		{name: "accepts the MNAME in another case", answer: []string{soaOf("example.test.", "NS1.Example.Test.", "admin.example.test.")}, ok: true},
+		{name: "accepts the zone file's SOA record", answer: []string{testSOA}, ok: true},
+		{name: "accepts a question in mixed case answered by its owner as asked", qname: "ExAmPlE.test.", answer: []string{testSOA}, mutate: func(resp *dns.Msg) { resp.Answer[0].Header().Name = "ExAmPlE.test." }, ok: true},
+		{name: "accepts the MNAME in another case", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Ns = "NS1.Example.Test." }), ok: true},
+		{name: "accepts the RNAME in another case", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Mbox = "Admin.Example.Test." }), ok: true},
 		{name: "rejects another rcode", rcode: dns.RcodeServerFailure, answer: []string{testSOA}},
 		{name: "rejects an empty answer", answer: nil},
 		{name: "rejects two SOA records", answer: []string{testSOA, testSOA}},
 		{name: "rejects a record of another type in the answer", answer: []string{testSOA, "example.test. 300 IN NS ns1.example.test."}},
 		{name: "rejects an SOA record in class CH", answer: []string{"example.test. 300 CH SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 300"}},
-		{name: "rejects an SOA record owned by another name", answer: []string{soaOf("www.example.test.", "ns1.example.test.", "admin.example.test.")}},
-		{name: "rejects the owner in another case than asked", answer: []string{soaOf("EXAMPLE.Test.", "ns1.example.test.", "admin.example.test.")}},
-		{name: "rejects another MNAME", answer: []string{soaOf("example.test.", "ns2.example.test.", "admin.example.test.")}},
-		{name: "rejects another RNAME", answer: []string{soaOf("example.test.", "ns1.example.test.", "hostmaster.example.test.")}},
-		{name: "rejects AA clear", answer: []string{testSOA}, mutate: func(resp *dns.Msg) { resp.Authoritative = false }},
-		{name: "rejects RA set", answer: []string{testSOA}, mutate: func(resp *dns.Msg) { resp.RecursionAvailable = true }},
-		{name: "rejects AD set", answer: []string{testSOA}, mutate: func(resp *dns.Msg) { resp.AuthenticatedData = true }},
-		{name: "rejects CD set", answer: []string{testSOA}, mutate: func(resp *dns.Msg) { resp.CheckingDisabled = true }},
+		{name: "rejects an SOA record owned by another name", answer: []string{testSOA}, mutate: func(resp *dns.Msg) { resp.Answer[0].Header().Name = "www.example.test." }},
+		{name: "rejects another MNAME", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Ns = "ns2.example.test." })},
+		{name: "rejects another RNAME", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Mbox = "hostmaster.example.test." })},
+		{name: "rejects another serial", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Serial++ })},
+		{name: "rejects another refresh", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Refresh++ })},
+		{name: "rejects another retry", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Retry++ })},
+		{name: "rejects another expire", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Expire++ })},
+		{name: "rejects another minimum", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Minttl++ })},
+		{name: "rejects a larger TTL", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Hdr.Ttl++ })},
+		{name: "rejects a smaller TTL", answer: []string{testSOA}, mutate: soaField(func(soa *dns.SOA) { soa.Hdr.Ttl-- })},
 	}
 
 	for _, tt := range tests {
@@ -1577,17 +1543,65 @@ func TestReferenceSOA(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(resp)
 			}
-			soa, err := referenceSOA(testTarget(), resp)
-			assertCheck(t, err, tt.ok)
-			if tt.ok && soa != resp.Answer[0] {
-				t.Errorf("referenceSOA returned %v, want the answer record %v", soa, resp.Answer[0])
+			assertCheck(t, checkApexSOA(testTarget(t), resp), tt.ok)
+		})
+	}
+}
+
+func TestCheckApexNS(t *testing.T) {
+	const (
+		ns1     = "ExAmPlE.test. 3600 IN NS ns1.example.test."
+		ns2     = "ExAmPlE.test. 3600 IN NS ns2.example.test."
+		nsOther = "ExAmPlE.test. 3600 IN NS ns.other.test."
+		ns1A    = "ns1.example.test. 3600 IN A 192.0.2.10"
+		ns1A2   = "ns1.example.test. 3600 IN A 192.0.2.12"
+		ns1AAAA = "ns1.example.test. 3600 IN AAAA 2001:db8::10"
+		ns2A    = "ns2.example.test. 3600 IN A 192.0.2.11"
+	)
+	tests := []struct {
+		name string
+		// answer and additional are those of the whole answer when nil.
+		answer     []string
+		authority  []string
+		additional []string
+		ok         bool
+	}{
+		{name: "accepts the NS records and the addresses of the name servers inside the zone", ok: true},
+		{name: "accepts the NS records in another order", answer: []string{nsOther, ns2, ns1}, ok: true},
+		{name: "accepts NS targets and owners of addresses in another case", answer: []string{"ExAmPlE.test. 3600 IN NS NS1.Example.TEST.", ns2, nsOther}, additional: []string{"NS1.Example.TEST. 3600 IN A 192.0.2.10", ns1A2, ns1AAAA, ns2A}, ok: true},
+		{name: "rejects a missing NS record", answer: []string{ns1, ns2}},
+		{name: "rejects an NS record that is not declared", answer: []string{ns1, ns2, nsOther, "ExAmPlE.test. 3600 IN NS ns3.example.test."}},
+		{name: "rejects an NS record with another TTL", answer: []string{ns1, ns2, "ExAmPlE.test. 300 IN NS ns.other.test."}},
+		{name: "rejects a record in the authority section", authority: []string{testSOA}},
+		{name: "rejects an empty additional section", additional: []string{}},
+		{name: "rejects a missing address record", additional: []string{ns1A, ns1A2, ns2A}},
+		{name: "rejects an extra address record of a name server", additional: []string{ns1A, ns1A2, ns1AAAA, ns2A, "ns2.example.test. 3600 IN AAAA 2001:db8::11"}},
+		{name: "rejects an address record of the name server outside the zone", additional: []string{ns1A, ns1A2, ns1AAAA, ns2A, "ns.other.test. 3600 IN A 192.0.2.99"}},
+		{name: "rejects a name server's A records in another order", additional: []string{ns1A2, ns1A, ns1AAAA, ns2A}},
+		{name: "rejects a name server's AAAA record in front of its A records", additional: []string{ns1AAAA, ns1A, ns1A2, ns2A}},
+		{name: "rejects the name servers' addresses in another order than their NS records", additional: []string{ns2A, ns1A, ns1A2, ns1AAAA}},
+		{name: "rejects an address record with another TTL", additional: []string{ns1A, ns1A2, "ns1.example.test. 300 IN AAAA 2001:db8::10", ns2A}},
+		{name: "rejects another address", additional: []string{ns1A, "ns1.example.test. 3600 IN A 192.0.2.13", ns1AAAA, ns2A}},
+		{name: "rejects an address in class CH", additional: []string{ns1A, ns1A2, ns1AAAA, "ns2.example.test. 3600 CH A 192.0.2.11"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			answer, additional := tt.answer, tt.additional
+			if answer == nil {
+				answer = []string{ns1, ns2, nsOther}
 			}
+			if additional == nil {
+				additional = []string{ns1A, ns1A2, ns1AAAA, ns2A}
+			}
+			resp := testReply(t, "ExAmPlE.test.", dns.TypeNS, dns.RcodeSuccess, answer, tt.authority, additional)
+			assertCheck(t, checkApexNS(testTarget(t), resp), tt.ok)
 		})
 	}
 }
 
 func TestCheckProbeCases(t *testing.T) {
-	tg := testTarget()
+	tg := testTarget(t)
 	tg.delegations = []targetDelegation{
 		{cut: "e2e-12345678.10-11-12-13.example.test.", nameServers: []string{"ns.other.test."}},
 		{cut: "e2e-abcdef01-10-11-12-13.example.test.", nameServers: []string{"ns.other.test."}},
@@ -2161,27 +2175,6 @@ func TestCheckTTL(t *testing.T) {
 	}
 }
 
-func TestCheckSOAMinimum(t *testing.T) {
-	const soa = "example.test. 3600 IN SOA ns1.example.test. admin.example.test. 2024072600 900 900 1800 "
-	tests := []struct {
-		name   string
-		answer []string
-		ok     bool
-	}{
-		{name: "accepts the MINIMUM", answer: []string{soa + "3600"}, ok: true},
-		{name: "rejects another MINIMUM", answer: []string{soa + "300"}},
-		{name: "rejects an empty answer"},
-		{name: "rejects two SOA records", answer: []string{soa + "3600", soa + "3600"}},
-		{name: "rejects a record of another type", answer: []string{"example.test. 3600 IN NS ns1.example.test."}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resp := testReply(t, "example.test.", dns.TypeSOA, dns.RcodeSuccess, tt.answer, nil, nil)
-			assertCheck(t, checkSOAMinimum(3600, resp), tt.ok)
-		})
-	}
-}
-
 func TestCheckNoRecords(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2349,7 +2342,7 @@ func TestAuthoritativeCases(t *testing.T) {
 	}
 	for _, tg := range []*target{production, capturedRigTarget(t)} {
 		t.Run(tg.name, func(t *testing.T) {
-			cases := authoritativeCases(tg, nil)
+			cases := authoritativeCases(tg)
 			names := make(map[string]bool)
 			for _, tc := range cases {
 				q := tc.query(toNameServer)

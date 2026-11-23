@@ -7,12 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/mail"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -24,17 +22,24 @@ const asciiWhitespace = " \t\r\n\v\f"
 
 type target struct {
 	// name says what the target is in log lines and messages: the Fly app or the compose project.
-	name        string
-	domain      string
-	nameServers []netip.Addr
-	email       string
+	name   string
+	domain string
+	// dnsServers are the IPv4 addresses the zone file gives the name servers inside the zone, where the suite sends its DNS questions: the machine that runs the suite may have no IPv6.
+	dnsServers []netip.Addr
+	// webAddresses are the IPv4 addresses of the apex, where the suite reaches the website and the published certificate.
+	webAddresses []netip.Addr
 	// publiclyDelegated is whether the domain is delegated to the name servers on the public internet, so that public resolvers can answer for it.
 	publiclyDelegated bool
 	// roots verify the certificates the target serves and publishes.
-	roots       *x509.CertPool
-	rname       string
-	delegations []targetDelegation
-	recordSets  []targetRecordSet
+	roots *x509.CertPool
+	// soa is the zone file's SOA record, which every SOA record a name server sends is held to.
+	soa *dns.SOA
+	// apexNS is the NS record set of the apex, whose answer carries an additional section where every other declared set carries none.
+	apexNS targetRecordSet
+	// apexNSAdditional is that additional section: for each name server inside the zone, in the order of the NS records, its A records then its AAAA records, each in file order.
+	apexNSAdditional []dns.RR
+	delegations      []targetDelegation
+	recordSets       []targetRecordSet
 }
 
 // targetSource is what a reader takes from a deployment's description for newTarget.
@@ -68,8 +73,9 @@ type targetRecordSet struct {
 	records []dns.RR
 }
 
-// targetZoneFile is what the suite expects from a zone file.
+// targetZoneFile is what the suite expects from a zone file. The NS records of the apex are kept apart from the record sets: they are no cut, and their answer is checked by a case of its own.
 type targetZoneFile struct {
+	apexNS      targetRecordSet
 	delegations []targetDelegation
 	recordSets  []targetRecordSet
 }
@@ -78,23 +84,22 @@ func (tg *target) zone() string {
 	return dns.Fqdn(tg.domain)
 }
 
-func (tg *target) nameServerHosts() []string {
-	hosts := make([]string, len(tg.nameServers))
-	for i := range tg.nameServers {
-		hosts[i] = fmt.Sprintf("ns%d.%s", i+1, tg.zone())
+// recordSet returns the record set the zone file declares at the owner, a canonical name, with the type, if any.
+func (tg *target) recordSet(owner string, rrtype uint16) (targetRecordSet, bool) {
+	i := slices.IndexFunc(tg.recordSets, func(set targetRecordSet) bool { return set.owner == owner && set.rrtype == rrtype })
+	if i < 0 {
+		return targetRecordSet{}, false
+	}
+	return tg.recordSets[i], true
+}
+
+// apexNSTargets are the names of the zone's name servers, in canonical form.
+func (tg *target) apexNSTargets() []string {
+	hosts := make([]string, len(tg.apexNS.records))
+	for i, rr := range tg.apexNS.records {
+		hosts[i] = rr.(*dns.NS).Ns
 	}
 	return hosts
-}
-
-// soaRname is the RNAME the server must send: the mailbox as emailToRname spells it, through the wire round trip and the lower-casing the server applies, so that a character the library escapes is spelled as the server spells it.
-func (tg *target) soaRname() string {
-	return tg.rname
-}
-
-func emailToRname(email string) string {
-	at := strings.LastIndex(email, "@")
-	local := strings.ReplaceAll(email[:at], ".", `\.`)
-	return local + "." + email[at+1:] + "."
 }
 
 // loadFlyTarget reads the target from a Fly config: a deployment on Fly is delegated on the public internet and serves certificates the system trusts.
@@ -179,57 +184,23 @@ func newTarget(src targetSource) (*target, error) {
 	}
 	tg.domain = domain
 
-	nameServers, err := requiredEnv(src.env, "XIP_NAMESERVERS")
-	if err != nil {
-		return nil, invalid("XIP_NAMESERVERS", "%w", err)
-	}
-	for i, element := range strings.Split(nameServers, ",") {
-		element = strings.Trim(element, asciiWhitespace)
-		if element == "" {
-			return nil, invalid("XIP_NAMESERVERS", "element %d is empty", i+1)
-		}
-		addr, err := netip.ParseAddr(element)
-		if err != nil {
-			return nil, invalid("XIP_NAMESERVERS", "element %d: %w", i+1, err)
-		}
-		if !addr.Is4() {
-			return nil, invalid("XIP_NAMESERVERS", "element %d: %s is not an IPv4 address", i+1, addr)
-		}
-		tg.nameServers = append(tg.nameServers, addr)
-	}
-
-	email, err := requiredEnv(src.env, "XIP_EMAIL")
-	if err != nil {
-		return nil, invalid("XIP_EMAIL", "%w", err)
-	}
-	parsed, err := mail.ParseAddress(email)
-	if err != nil {
-		return nil, invalid("XIP_EMAIL", "%w", err)
-	}
-	if parsed.Address != email {
-		return nil, invalid("XIP_EMAIL", "%q must be a bare address, not %q", parsed.Address, email)
-	}
-	tg.email = email
-	tg.rname, err = wireCanonicalName(emailToRname(email))
-	if err != nil {
-		return nil, invalid("XIP_EMAIL", "%q cannot be the RNAME of the SOA record: %w", email, err)
-	}
-
-	zoneFile, present, err := optionalEnv(src.env, "XIP_ZONE_FILE")
+	zoneFile, err := requiredEnv(src.env, "XIP_ZONE_FILE")
 	if err != nil {
 		return nil, invalid("XIP_ZONE_FILE", "%w", err)
 	}
-	if present && zoneFile != "" {
-		localPath, delivered := src.files[zoneFile]
-		if !delivered {
-			return nil, invalid("XIP_ZONE_FILE", "%q is not the path of a file the deployment delivers to the server", zoneFile)
-		}
-		zf, err := loadZoneFile(localPath, tg.zone())
-		if err != nil {
-			return nil, invalid("XIP_ZONE_FILE", "%w", err)
-		}
-		tg.delegations = zf.delegations
-		tg.recordSets = zf.recordSets
+	localPath, delivered := src.files[zoneFile]
+	if !delivered {
+		return nil, invalid("XIP_ZONE_FILE", "%q is not the path of a file the deployment delivers to the server", zoneFile)
+	}
+	zf, err := loadZoneFile(localPath, tg.zone())
+	if err != nil {
+		return nil, invalid("XIP_ZONE_FILE", "%w", err)
+	}
+	tg.apexNS = zf.apexNS
+	tg.delegations = zf.delegations
+	tg.recordSets = zf.recordSets
+	if err := tg.readApex(); err != nil {
+		return nil, invalid("XIP_ZONE_FILE", "zone file %s %w", localPath, err)
 	}
 
 	if err := checkProbes(tg); err != nil {
@@ -240,6 +211,46 @@ func newTarget(src targetSource) (*target, error) {
 	}
 
 	return tg, nil
+}
+
+// readApex takes from the zone file's records what the suite reaches the target through and holds the answers at the apex to: the SOA record, the addresses of the name servers inside the zone, and the addresses of the apex.
+func (tg *target) readApex() error {
+	zone := tg.zone()
+	soa, _ := tg.recordSet(zone, dns.TypeSOA)
+	if len(soa.records) != 1 {
+		return fmt.Errorf("declares %d SOA records at the apex, want exactly one, which every SOA record a name server sends is held to", len(soa.records))
+	}
+	tg.soa = soa.records[0].(*dns.SOA)
+
+	for _, host := range tg.apexNSTargets() {
+		if !dns.IsSubDomain(zone, host) {
+			continue
+		}
+		for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			set, _ := tg.recordSet(host, rrtype)
+			tg.apexNSAdditional = append(tg.apexNSAdditional, set.records...)
+		}
+		set, _ := tg.recordSet(host, dns.TypeA)
+		for _, rr := range set.records {
+			if addr, ok := address(rr); ok && !slices.Contains(tg.dnsServers, addr) {
+				tg.dnsServers = append(tg.dnsServers, addr)
+			}
+		}
+	}
+	if len(tg.dnsServers) == 0 {
+		return errors.New("gives no name server inside the zone an A record, so the suite has no IPv4 address to send its DNS questions to")
+	}
+
+	apexA, _ := tg.recordSet(zone, dns.TypeA)
+	for _, rr := range apexA.records {
+		if addr, ok := address(rr); ok {
+			tg.webAddresses = append(tg.webAddresses, addr)
+		}
+	}
+	if len(tg.webAddresses) == 0 {
+		return errors.New("declares no A record at the apex, so the suite has no address to reach the website and the published certificate at")
+	}
+	return nil
 }
 
 // wireCanonicalName returns the name as it reads after a round trip through wire format,
@@ -280,6 +291,8 @@ func comparableRecord(rr dns.RR) (dns.RR, error) {
 		names = append(names, &record.Mx)
 	case *dns.SRV:
 		names = append(names, &record.Target)
+	case *dns.SOA:
+		names = append(names, &record.Ns, &record.Mbox)
 	}
 	for _, name := range names {
 		canonical, err := wireCanonicalName(*name)
@@ -303,7 +316,7 @@ func generateDirectiveLine(content string) (int, bool) {
 	return 0, false
 }
 
-// loadZoneFile reads from a zone file the cuts, their name servers and the glue for them, and the record sets declared outside every delegation. It does not repeat the server's validation: the suite only needs to know what to expect.
+// loadZoneFile reads from a zone file the NS records of the apex, the cuts, their name servers and the glue for them, and the record sets declared outside every delegation. It does not repeat the server's validation: the suite only needs to know what to expect.
 func loadZoneFile(zoneFilePath string, zone string) (targetZoneFile, error) {
 	content, err := os.ReadFile(zoneFilePath)
 	if err != nil {
@@ -317,6 +330,7 @@ func loadZoneFile(zoneFilePath string, zone string) (targetZoneFile, error) {
 	zp := dns.NewZoneParser(bytes.NewReader(content), zone, zoneFilePath)
 	zp.SetDefaultTTL(300)
 	byCut := make(map[string]*targetDelegation)
+	apexNS := targetRecordSet{owner: zone, rrtype: dns.TypeNS}
 	var others []dns.RR
 	for parsed, ok := zp.Next(); ok; parsed, ok = zp.Next() {
 		rr, err := comparableRecord(parsed)
@@ -327,7 +341,11 @@ func loadZoneFile(zoneFilePath string, zone string) (targetZoneFile, error) {
 		ns, isNS := rr.(*dns.NS)
 		switch {
 		case isNS && owner == zone:
-			// The server refuses an NS record at the apex, whose name servers come from its configuration, so it is no cut and no referral may be expected there.
+			// The NS records of the apex name the zone's own name servers: the server answers for the apex itself, so it is no cut and no referral may be expected there.
+			if len(apexNS.records) == 0 {
+				apexNS.ttl = rr.Header().Ttl
+			}
+			apexNS.records = append(apexNS.records, rr)
 		case isNS:
 			d, ok := byCut[owner]
 			if !ok {
@@ -376,7 +394,7 @@ func loadZoneFile(zoneFilePath string, zone string) (targetZoneFile, error) {
 		}
 		delegations = append(delegations, *d)
 	}
-	return targetZoneFile{delegations: delegations, recordSets: recordSets}, nil
+	return targetZoneFile{apexNS: apexNS, delegations: delegations, recordSets: recordSets}, nil
 }
 
 // address returns the address of an A or AAAA record, an IPv4 address of an A record unmapped.
@@ -411,18 +429,6 @@ func requiredString(value any, present bool) (string, error) {
 	return s, nil
 }
 
-func optionalEnv(env map[string]any, key string) (string, bool, error) {
-	value, present := env[key]
-	if !present {
-		return "", false, nil
-	}
-	s, ok := value.(string)
-	if !ok {
-		return "", true, fmt.Errorf("must be a string, got %T", value)
-	}
-	return strings.Trim(s, asciiWhitespace), true, nil
-}
-
 func TestLoadProductionConfig(t *testing.T) {
 	tg, err := loadFlyTarget(filepath.Join("..", "fly.toml"))
 	if err != nil {
@@ -436,17 +442,24 @@ func TestLoadProductionConfig(t *testing.T) {
 		t.Errorf("domain = %q, want %q", tg.domain, "local-ip.sh")
 	}
 	want := []netip.Addr{netip.MustParseAddr("137.66.40.11"), netip.MustParseAddr("137.66.40.12")}
-	if !slices.Equal(tg.nameServers, want) {
-		t.Errorf("nameServers = %v, want %v", tg.nameServers, want)
+	if !slices.Equal(tg.dnsServers, want) {
+		t.Errorf("dnsServers = %v, want %v", tg.dnsServers, want)
+	}
+	if !slices.Equal(tg.webAddresses, want) {
+		t.Errorf("webAddresses = %v, want %v", tg.webAddresses, want)
 	}
 	if !tg.publiclyDelegated {
 		t.Error("publiclyDelegated = false, want true")
 	}
-	if got, want := tg.soaRname(), "admin.local-ip.sh."; got != want {
-		t.Errorf("soaRname = %q, want %q", got, want)
-	}
+	assertRecords(t, "SOA", []dns.RR{tg.soa}, []string{`local-ip.sh. 3600 IN SOA ns1.local-ip.sh. admin.local-ip.sh. 2024072600 900 900 1800 3600`})
+	assertRecords(t, "apex NS", tg.apexNS.records, []string{`local-ip.sh. 3600 IN NS ns1.local-ip.sh.`, `local-ip.sh. 3600 IN NS ns2.local-ip.sh.`})
+	assertRecords(t, "apex NS additional", tg.apexNSAdditional, []string{`ns1.local-ip.sh. 3600 IN A 137.66.40.11`, `ns2.local-ip.sh. 3600 IN A 137.66.40.12`})
 	assertDelegations(t, tg.delegations, nil)
 	assertRecordSets(t, tg.recordSets, [][]string{
+		{`local-ip.sh. 3600 IN SOA ns1.local-ip.sh. admin.local-ip.sh. 2024072600 900 900 1800 3600`},
+		{`ns1.local-ip.sh. 3600 IN A 137.66.40.11`},
+		{`ns2.local-ip.sh. 3600 IN A 137.66.40.12`},
+		{`local-ip.sh. 3600 IN A 137.66.40.11`, `local-ip.sh. 3600 IN A 137.66.40.12`},
 		{`local-ip.sh. 300 IN MX 10 mail.mial.net.`},
 		{`local-ip.sh. 300 IN TXT "v=spf1 mx -all"`},
 		{`202411e._domainkey.local-ip.sh. 300 IN TXT "v=DKIM1; k=ed25519; h=sha256; p=Xic3wKt0G+05OJw4q9U5FImcGnvKcMK5chBgYljJv8c="`},
@@ -454,20 +467,38 @@ func TestLoadProductionConfig(t *testing.T) {
 		{`_dmarc.local-ip.sh. 300 IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@local-ip.sh"`},
 		{`_smtp._tls.local-ip.sh. 300 IN TXT "v=TLSRPTv1; rua=mailto:postmaster@local-ip.sh"`},
 	})
-	i := slices.IndexFunc(tg.recordSets, func(set targetRecordSet) bool { return set.owner == "202411r._domainkey.local-ip.sh." })
-	if i < 0 {
+	set, ok := tg.recordSet("202411r._domainkey.local-ip.sh.", dns.TypeTXT)
+	if !ok {
 		return
 	}
 	var lengths []int
-	for _, rr := range tg.recordSets[i].records {
-		if txt, ok := rr.(*dns.TXT); ok {
-			for _, s := range txt.Txt {
-				lengths = append(lengths, len(s))
-			}
+	for _, rr := range set.records {
+		for _, s := range rr.(*dns.TXT).Txt {
+			lengths = append(lengths, len(s))
 		}
 	}
-	if len(tg.recordSets[i].records) != 1 || !slices.Equal(lengths, []int{255, 165}) {
-		t.Errorf("DKIM record set has %d records with strings of %v octets, want one record of two strings of 255 and 165 octets", len(tg.recordSets[i].records), lengths)
+	if len(set.records) != 1 || !slices.Equal(lengths, []int{255, 165}) {
+		t.Errorf("DKIM record set has %d records with strings of %v octets, want one record of two strings of 255 and 165 octets", len(set.records), lengths)
+	}
+}
+
+// assertRecords compares records with the expected ones, given in zone file syntax with absolute names, in order.
+func assertRecords(t *testing.T, what string, got []dns.RR, want []string) {
+	t.Helper()
+	gotRecords := make([]string, len(got))
+	for i, rr := range got {
+		gotRecords[i] = rr.String()
+	}
+	wantRecords := make([]string, len(want))
+	for i, s := range want {
+		rr, err := comparableRecord(mustRR(t, s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantRecords[i] = rr.String()
+	}
+	if !slices.Equal(gotRecords, wantRecords) {
+		t.Errorf("%s = %q, want %q", what, gotRecords, wantRecords)
 	}
 }
 
@@ -507,18 +538,23 @@ func assertRecordSets(t *testing.T, got []targetRecordSet, want [][]string) {
 	}
 }
 
-// TestRigZoneFile holds the rig's zone file to the record sets and the delegation the suite's cases rely on.
+// TestRigZoneFile holds the rig's zone file to the records at the apex, the record sets and the delegation the suite's cases rely on.
 func TestRigZoneFile(t *testing.T) {
 	zf, err := loadZoneFile(filepath.Join("rig", "zone"), "local-ip.test.")
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertRecords(t, "apex NS", zf.apexNS.records, []string{`local-ip.test. 7200 IN NS dns-a.local-ip.test.`})
 	assertDelegations(t, zf.delegations, []targetDelegation{{
 		cut:         "e2e-delegated.local-ip.test.",
 		nameServers: []string{"ns1.e2e-delegated.local-ip.test."},
 		glue:        map[string][]netip.Addr{"ns1.e2e-delegated.local-ip.test.": {netip.MustParseAddr("192.0.2.53")}},
 	}})
 	assertRecordSets(t, zf.recordSets, [][]string{
+		{`local-ip.test. 1800 IN SOA dns-a.local-ip.test. hostmaster.local-ip.test. 2026112301 7200 600 86400 120`},
+		{`dns-a.local-ip.test. 1200 IN A 10.253.53.53`},
+		{`dns-a.local-ip.test. 1200 IN AAAA 2001:db8:53::53`},
+		{`local-ip.test. 600 IN A 10.253.53.53`},
 		{`e2e-records.local-ip.test. 300 IN A 192.0.2.10`},
 		{`e2e-records.local-ip.test. 300 IN AAAA 2001:db8::10`},
 		{`e2e-records.local-ip.test. 300 IN TXT "local-ip.sh e2e" "second string"`},
@@ -580,11 +616,11 @@ func flyConfig(app string, env map[string]string) string {
 	return b.String()
 }
 
+// validEnv is the environment of a target for example.com whose zone file is delivered by zoneFileEntry; an override of "" removes the variable.
 func validEnv(overrides map[string]string) map[string]string {
 	env := map[string]string{
-		"XIP_DOMAIN":      `"example.com"`,
-		"XIP_NAMESERVERS": `"1.2.3.4,5.6.7.8"`,
-		"XIP_EMAIL":       `"admin@example.com"`,
+		"XIP_DOMAIN":    `"example.com"`,
+		"XIP_ZONE_FILE": `"/etc/local-ip.zone"`,
 	}
 	for k, v := range overrides {
 		if v == "" {
@@ -596,12 +632,40 @@ func validEnv(overrides map[string]string) map[string]string {
 	return env
 }
 
+const zoneFileEntry = "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n"
+
+// minimalZone is the least a target's zone file for example.com holds: its SOA record, a name server inside the zone with an address, and an address of the apex. Its names are absolute and its TTLs written, so that it means the same after any $ORIGIN or $TTL of the lines in front of it.
+const minimalZone = "example.com. 3600 SOA ns1.example.com. hostmaster.example.com. 1 7200 900 1209600 300\nexample.com. 3600 NS ns1.example.com.\nns1.example.com. 3600 A 192.0.2.53\nexample.com. 3600 A 192.0.2.80\n"
+
+// minimalSets are the record sets of minimalZone, in its order.
+var minimalSets = [][]string{
+	{`example.com. 3600 IN SOA ns1.example.com. hostmaster.example.com. 1 7200 900 1209600 300`},
+	{`ns1.example.com. 3600 IN A 192.0.2.53`},
+	{`example.com. 3600 IN A 192.0.2.80`},
+}
+
+// writeTarget writes a Fly config with the environment of validEnv and the overrides, and the zone file it delivers, and returns the config's path.
+func writeTarget(t *testing.T, overrides map[string]string, zone string) string {
+	t.Helper()
+	configPath := writeConfig(t, flyConfig(`"a"`, validEnv(overrides))+"\n"+zoneFileEntry)
+	zonesDir := filepath.Join(filepath.Dir(configPath), "zones")
+	if err := os.Mkdir(zonesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeZoneFile(t, zonesDir, "test.zone", zone)
+	return configPath
+}
+
 func TestLoadTargetNormalisesValues(t *testing.T) {
-	configPath := writeConfig(t, flyConfig(`"  my-app  "`, map[string]string{
-		"XIP_DOMAIN":      `" Example.COM. "`,
-		"XIP_NAMESERVERS": `" 1.2.3.4 ,\t5.6.7.8 "`,
-		"XIP_EMAIL":       `" first.last@example.com "`,
-	}))
+	configPath := writeConfig(t, flyConfig(`"  my-app  "`, validEnv(map[string]string{
+		"XIP_DOMAIN":    `" Example.COM. "`,
+		"XIP_ZONE_FILE": `" /etc/local-ip.zone "`,
+	}))+"\n"+zoneFileEntry)
+	zonesDir := filepath.Join(filepath.Dir(configPath), "zones")
+	if err := os.Mkdir(zonesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeZoneFile(t, zonesDir, "test.zone", minimalZone)
 
 	tg, err := loadFlyTarget(configPath)
 	if err != nil {
@@ -616,17 +680,6 @@ func TestLoadTargetNormalisesValues(t *testing.T) {
 	}
 	if tg.zone() != "example.com." {
 		t.Errorf("zone = %q, want %q", tg.zone(), "example.com.")
-	}
-	wantHosts := []string{"ns1.example.com.", "ns2.example.com."}
-	if !slices.Equal(tg.nameServerHosts(), wantHosts) {
-		t.Errorf("nameServerHosts = %v, want %v", tg.nameServerHosts(), wantHosts)
-	}
-	wantIPs := []netip.Addr{netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("5.6.7.8")}
-	if !slices.Equal(tg.nameServers, wantIPs) {
-		t.Errorf("nameServers = %v, want %v", tg.nameServers, wantIPs)
-	}
-	if tg.email != "first.last@example.com" {
-		t.Errorf("email = %q, want %q", tg.email, "first.last@example.com")
 	}
 }
 
@@ -644,18 +697,8 @@ func TestLoadTargetRejectsInvalidConfig(t *testing.T) {
 		{name: "domain empty", app: `"a"`, env: validEnv(map[string]string{"XIP_DOMAIN": `" "`}), key: "XIP_DOMAIN"},
 		{name: "domain only a dot", app: `"a"`, env: validEnv(map[string]string{"XIP_DOMAIN": `"."`}), key: "XIP_DOMAIN"},
 		{name: "domain with empty label", app: `"a"`, env: validEnv(map[string]string{"XIP_DOMAIN": `"a..b"`}), key: "XIP_DOMAIN"},
-		{name: "nameservers missing", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": ""}), key: "XIP_NAMESERVERS"},
-		{name: "nameservers empty", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": `""`}), key: "XIP_NAMESERVERS"},
-		{name: "nameservers empty element", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": `"1.2.3.4,"`}), key: "XIP_NAMESERVERS"},
-		{name: "nameservers blank element", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": `"1.2.3.4, ,5.6.7.8"`}), key: "XIP_NAMESERVERS"},
-		{name: "nameservers not an IP", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": `"ns1.example.com"`}), key: "XIP_NAMESERVERS"},
-		{name: "nameservers IPv6", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": `"1.2.3.4,2001:db8::1"`}), key: "XIP_NAMESERVERS"},
-		{name: "nameservers IPv4-mapped IPv6", app: `"a"`, env: validEnv(map[string]string{"XIP_NAMESERVERS": `"::ffff:1.2.3.4"`}), key: "XIP_NAMESERVERS"},
-		{name: "email missing", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": ""}), key: "XIP_EMAIL"},
-		{name: "email empty", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `""`}), key: "XIP_EMAIL"},
-		{name: "email invalid", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `"not-an-address"`}), key: "XIP_EMAIL"},
-		{name: "email with display name", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `"Admin <admin@example.com>"`}), key: "XIP_EMAIL"},
-		{name: "email in angle brackets", app: `"a"`, env: validEnv(map[string]string{"XIP_EMAIL": `"<admin@example.com>"`}), key: "XIP_EMAIL"},
+		{name: "zone file missing", app: `"a"`, env: validEnv(map[string]string{"XIP_ZONE_FILE": ""}), key: "XIP_ZONE_FILE"},
+		{name: "zone file empty", app: `"a"`, env: validEnv(map[string]string{"XIP_ZONE_FILE": `" "`}), key: "XIP_ZONE_FILE"},
 		{name: "zone file not a string", app: `"a"`, env: validEnv(map[string]string{"XIP_ZONE_FILE": `true`}), key: "XIP_ZONE_FILE"},
 	}
 
@@ -677,71 +720,98 @@ func TestLoadTargetRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestEmailToRname(t *testing.T) {
+// TestLoadTargetApex holds the target reader to what it takes from the records at the apex: where the suite sends its DNS questions and reaches the website, and what the answers to SOA and NS at the apex must carry.
+func TestLoadTargetApex(t *testing.T) {
+	const soa = "$TTL 300\n@ 3600 SOA ns1 hostmaster 1 7200 900 1209600 300\n"
 	tests := []struct {
-		email string
-		want  string
+		name           string
+		zone           string
+		wantDNSServers []string
+		wantWeb        []string
+		wantAdditional []string
+		wantErr        []string
 	}{
-		{email: "admin@local-ip.sh", want: "admin.local-ip.sh."},
-		{email: "first.last@example.com", want: `first\.last.example.com.`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.email, func(t *testing.T) {
-			if got := emailToRname(tt.email); got != tt.want {
-				t.Errorf("emailToRname(%q) = %q, want %q", tt.email, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestLoadTargetSOARname(t *testing.T) {
-	tests := []struct {
-		name  string
-		email string
-		want  string
-	}{
-		{name: "a plain address keeps its spelling", email: "admin@local-ip.sh", want: "admin.local-ip.sh."},
-		{name: "a mixed-case address is lower-cased", email: "Admin.Team@EXAMPLE.Test", want: `admin\.team.example.test.`},
-		{name: "a dot in the local part is escaped", email: "first.last@example.com", want: `first\.last.example.com.`},
-		{name: "an apostrophe is escaped as the library unpacks it", email: "O'Brien@example.test", want: `o\'brien.example.test.`},
+		{
+			name:           "the A records of the name servers inside the zone in the order of the NS records, their AAAA records in the additional section only",
+			zone:           soa + "@ 3600 NS ns2\n@ 3600 NS ns.other.test.\n@ 3600 NS NS1\nns1 3600 A 192.0.2.1\nns2 3600 AAAA 2001:db8::2\nns1 3600 AAAA 2001:db8::1\nns2 3600 A 192.0.2.2\nns2 3600 A 192.0.2.3\n@ 300 A 192.0.2.80\n@ 300 A 192.0.2.81\n@ 300 AAAA 2001:db8::80\n",
+			wantDNSServers: []string{"192.0.2.2", "192.0.2.3", "192.0.2.1"},
+			wantWeb:        []string{"192.0.2.80", "192.0.2.81"},
+			wantAdditional: []string{
+				"ns2.example.com. 3600 IN A 192.0.2.2", "ns2.example.com. 3600 IN A 192.0.2.3", "ns2.example.com. 3600 IN AAAA 2001:db8::2",
+				"ns1.example.com. 3600 IN A 192.0.2.1", "ns1.example.com. 3600 IN AAAA 2001:db8::1",
+			},
+		},
+		{
+			name:           "an address two name servers share is asked once",
+			zone:           soa + "@ NS ns1\n@ NS ns2\nns1 A 192.0.2.1\nns2 A 192.0.2.1\n@ A 192.0.2.80\n",
+			wantDNSServers: []string{"192.0.2.1"},
+			wantWeb:        []string{"192.0.2.80"},
+			wantAdditional: []string{"ns1.example.com. 300 IN A 192.0.2.1", "ns2.example.com. 300 IN A 192.0.2.1"},
+		},
+		{
+			name:    "no SOA record",
+			zone:    "@ NS ns1\nns1 A 192.0.2.1\n@ A 192.0.2.80\n",
+			wantErr: []string{"declares 0 SOA records at the apex, want exactly one"},
+		},
+		{
+			name:    "two SOA records",
+			zone:    soa + "@ 3600 SOA ns1 hostmaster 2 7200 900 1209600 300\n@ NS ns1\nns1 A 192.0.2.1\n@ A 192.0.2.80\n",
+			wantErr: []string{"declares 2 SOA records at the apex, want exactly one"},
+		},
+		{
+			name:    "only name servers outside the zone",
+			zone:    soa + "@ NS ns.other.test.\n@ A 192.0.2.80\n",
+			wantErr: []string{"gives no name server inside the zone an A record"},
+		},
+		{
+			name:    "a name server inside the zone with an AAAA record alone",
+			zone:    soa + "@ NS ns1\nns1 AAAA 2001:db8::1\n@ A 192.0.2.80\n",
+			wantErr: []string{"gives no name server inside the zone an A record"},
+		},
+		{
+			name:    "no NS record at the apex",
+			zone:    soa + "ns1 A 192.0.2.1\n@ A 192.0.2.80\n",
+			wantErr: []string{"gives no name server inside the zone an A record"},
+		},
+		{
+			name:    "no A record at the apex",
+			zone:    soa + "@ NS ns1\nns1 A 192.0.2.1\n@ AAAA 2001:db8::80\n",
+			wantErr: []string{"declares no A record at the apex"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tg, err := loadFlyTarget(writeConfig(t, flyConfig(`"a"`, validEnv(map[string]string{"XIP_EMAIL": strconv.Quote(tt.email)}))))
+			configPath := writeTarget(t, nil, tt.zone)
+			tg, err := loadFlyTarget(configPath)
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatal("loadFlyTarget succeeded, want an error")
+				}
+				for _, want := range append([]string{configPath, "env.XIP_ZONE_FILE", "test.zone"}, tt.wantErr...) {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := tg.soaRname(); got != tt.want {
-				t.Errorf("soaRname() for %q = %q, want %q", tt.email, got, tt.want)
+			var dnsServers, web []string
+			for _, addr := range tg.dnsServers {
+				dnsServers = append(dnsServers, addr.String())
 			}
-		})
-	}
-}
-
-func TestLoadTargetRejectsEmailThatCannotBeAnRname(t *testing.T) {
-	label := func(c string, n int) string { return strings.Repeat(c, n) }
-	tests := []struct {
-		name  string
-		email string
-	}{
-		{name: "a local part of 64 octets is longer than a label", email: label("a", 64) + "@example.test"},
-		{name: "a local part and a domain that make a name of 257 octets", email: label("a", 63) + "@" + label("b", 63) + "." + label("c", 63) + "." + label("d", 63)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			configPath := writeConfig(t, flyConfig(`"a"`, validEnv(map[string]string{"XIP_EMAIL": strconv.Quote(tt.email)})))
-			_, err := loadFlyTarget(configPath)
-			if err == nil {
-				t.Fatal("loadFlyTarget succeeded, want an error")
+			for _, addr := range tg.webAddresses {
+				web = append(web, addr.String())
 			}
-			for _, want := range []string{configPath, "XIP_EMAIL", "RNAME"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not contain %q", err, want)
-				}
+			if !slices.Equal(dnsServers, tt.wantDNSServers) {
+				t.Errorf("dnsServers = %v, want %v", dnsServers, tt.wantDNSServers)
 			}
+			if !slices.Equal(web, tt.wantWeb) {
+				t.Errorf("webAddresses = %v, want %v", web, tt.wantWeb)
+			}
+			assertRecords(t, "apex NS additional", tg.apexNSAdditional, tt.wantAdditional)
 		})
 	}
 }
@@ -780,16 +850,17 @@ func TestLoadTargetZoneFile(t *testing.T) {
 		glue:        map[string][]netip.Addr{"ns1.sub.example.com.": {netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}},
 	}}
 
-	const zoneFileEntry = "[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n"
-
 	tests := []struct {
-		name     string
-		zoneEnv  string
-		files    string
+		name    string
+		zoneEnv string
+		files   string
+		// zone is followed by minimalZone in the file, so that the target is complete, and wantSets by minimalSets.
 		zone     string
 		want     []targetDelegation
 		wantSets [][]string
-		wantErr  []string
+		// wantApexNS is the NS set of the apex when the zone declares NS records at the apex of its own.
+		wantApexNS []string
+		wantErr    []string
 	}{
 		{
 			name:    "records outside every delegation are record sets in file order, with the glue left to its cut",
@@ -864,20 +935,27 @@ func TestLoadTargetZoneFile(t *testing.T) {
 			},
 		},
 		{
-			name:    "an NS record at the apex is neither a cut nor a record set",
+			name:    "NS records at the apex are the apex NS set in file order, neither a cut nor a record set",
 			zoneEnv: zoneFile,
 			files:   zoneFileEntry,
-			zone:    "@ NS ns.other.test.\n@ TXT \"apex\"\n",
+			zone:    "@ 3600 NS ns.other.test.\n@ 300 TXT \"apex\"\n",
 			wantSets: [][]string{
 				{`example.com. 300 IN TXT "apex"`},
 			},
+			wantApexNS: []string{`example.com. 3600 IN NS ns.other.test.`, `example.com. 3600 IN NS ns1.example.com.`},
 		},
 		{
-			name: "no XIP_ZONE_FILE yields no delegations",
+			name:    "no XIP_ZONE_FILE",
+			files:   zoneFileEntry,
+			zone:    "; complete\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "is required"},
 		},
 		{
-			name:    "empty XIP_ZONE_FILE yields no delegations",
+			name:    "empty XIP_ZONE_FILE",
 			zoneEnv: `""`,
+			files:   zoneFileEntry,
+			zone:    "; complete\n",
+			wantErr: []string{"env.XIP_ZONE_FILE", "must not be empty"},
 		},
 		{
 			name:    "local path relative to the config directory",
@@ -974,17 +1052,13 @@ func TestLoadTargetZoneFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			env := validEnv(nil)
-			if tt.zoneEnv != "" {
-				env["XIP_ZONE_FILE"] = tt.zoneEnv
-			}
-			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n"+tt.files)
+			configPath := writeConfig(t, flyConfig(`"a"`, validEnv(map[string]string{"XIP_ZONE_FILE": tt.zoneEnv}))+"\n"+tt.files)
 			if tt.zone != "" {
 				zonesDir := filepath.Join(filepath.Dir(configPath), "zones")
 				if err := os.Mkdir(zonesDir, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				writeZoneFile(t, zonesDir, "test.zone", tt.zone)
+				writeZoneFile(t, zonesDir, "test.zone", tt.zone+minimalZone)
 			}
 
 			tg, err := loadFlyTarget(configPath)
@@ -1003,7 +1077,12 @@ func TestLoadTargetZoneFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertDelegations(t, tg.delegations, tt.want)
-			assertRecordSets(t, tg.recordSets, tt.wantSets)
+			assertRecordSets(t, tg.recordSets, slices.Concat(tt.wantSets, minimalSets))
+			wantApexNS := tt.wantApexNS
+			if wantApexNS == nil {
+				wantApexNS = []string{`example.com. 3600 IN NS ns1.example.com.`}
+			}
+			assertRecords(t, "apex NS", tg.apexNS.records, wantApexNS)
 		})
 	}
 }
@@ -1076,23 +1155,14 @@ func TestLoadedRecordSetIsCheckedAgainstAnswersOnTheWire(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			env := validEnv(nil)
-			env["XIP_ZONE_FILE"] = `"/etc/local-ip.zone"`
-			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"zones/test.zone\"\n")
-			zonesDir := filepath.Join(filepath.Dir(configPath), "zones")
-			if err := os.Mkdir(zonesDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			writeZoneFile(t, zonesDir, "test.zone", tt.zone+"\n")
-
-			tg, err := loadFlyTarget(configPath)
+			tg, err := loadFlyTarget(writeTarget(t, nil, tt.zone+"\n"+minimalZone))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(tg.recordSets) != 1 || len(tg.recordSets[0].records) != 1 || tg.recordSets[0].rrtype != tt.rrtype {
-				t.Fatalf("record sets = %+v, want one set of one %s record", tg.recordSets, dns.Type(tt.rrtype))
+			set, ok := tg.recordSet("www.example.com.", tt.rrtype)
+			if !ok || len(set.records) != 1 {
+				t.Fatalf("record sets = %+v, want one set of one %s record at www.example.com.", tg.recordSets, dns.Type(tt.rrtype))
 			}
-			set := tg.recordSets[0]
 			if tt.declared != "" {
 				fields, err := rdataFields(set.records[0])
 				if err != nil {
@@ -1132,9 +1202,7 @@ func TestLoadTargetRejectsZoneFileThatClaimsAProbeName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			env := validEnv(map[string]string{"XIP_ZONE_FILE": `"/etc/local-ip.zone"`})
-			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"test.zone\"\n")
-			writeZoneFile(t, filepath.Dir(configPath), "test.zone", tt.zone)
+			configPath := writeTarget(t, nil, tt.zone+minimalZone)
 
 			_, err := loadFlyTarget(configPath)
 			if err == nil {
@@ -1171,9 +1239,7 @@ func TestLoadTargetChecksTransportSets(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			env := validEnv(map[string]string{"XIP_ZONE_FILE": `"/etc/local-ip.zone"`})
-			configPath := writeConfig(t, flyConfig(`"a"`, env)+"\n[[files]]\nguest_path = \"/etc/local-ip.zone\"\nlocal_path = \"test.zone\"\n")
-			writeZoneFile(t, filepath.Dir(configPath), "test.zone", tt.zone)
+			configPath := writeTarget(t, nil, tt.zone+minimalZone)
 
 			_, err := loadFlyTarget(configPath)
 			if tt.wantErr == nil {

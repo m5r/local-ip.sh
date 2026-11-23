@@ -2,6 +2,7 @@ package xip
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"slices"
 	"strings"
@@ -12,27 +13,19 @@ import (
 )
 
 func TestConstructor(t *testing.T) {
-	xip, err := NewXip(
-		WithDomain("local-ip.sh"),
-		WithEmail("admin@local-ip.sh"),
-		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
-	)
+	xip, err := NewXip(WithDomain("local-ip.sh"), withTestZone(t, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"ns1.local-ip.sh.", "ns2.local-ip.sh."}
-	if !slices.Equal(xip.zone.nameServers, want) {
-		t.Errorf("name servers = %q, want %q", xip.zone.nameServers, want)
+	want := rrStrings(t, "local-ip.sh. 3600 IN NS ns1.local-ip.sh.", "local-ip.sh. 3600 IN NS ns2.local-ip.sh.")
+	if got := stringsOf(xip.zone.records["local-ip.sh."][dns.TypeNS]); !slices.Equal(got, want) {
+		t.Errorf("NS records = %q, want %q", got, want)
 	}
 }
 
 func TestResolveDashE2E(t *testing.T) {
-	address := startTestServer(t,
-		WithDomain("resolve-dash.test"),
-		WithEmail("admin@resolve-dash.test"),
-		WithNameServers([]string{"1.2.3.4", "5.6.7.8"}),
-	)
+	address := startTestServer(t, WithDomain("resolve-dash.test"), withTestZone(t, ""))
 
 	resp := queryTestServer(t, address, "192-168-1-29.resolve-dash.test.", dns.TypeA)
 
@@ -115,27 +108,23 @@ func queryTestServer(t *testing.T, address string, name string, qtype uint16) *d
 	return resp
 }
 
-// TestInstanceIsolation shows that each instance answers from its own zone: its own name server address, and a refusal for the other instance's names.
+// TestInstanceIsolation shows that each instance answers from its own zone: its own records, and a refusal for the other instance's names.
 func TestInstanceIsolation(t *testing.T) {
 	instances := []struct {
-		domain, other, address string
+		domain, other, marker string
 	}{
-		{domain: "one.test", other: "two.test", address: "1.1.1.1"},
-		{domain: "two.test", other: "one.test", address: "2.2.2.2"},
+		{domain: "one.test", other: "two.test", marker: "one"},
+		{domain: "two.test", other: "one.test", marker: "two"},
 	}
 	servers := make([]string, len(instances))
 	for i, instance := range instances {
-		servers[i] = startTestServer(t,
-			WithDomain(instance.domain),
-			WithEmail("admin@"+instance.domain),
-			WithNameServers([]string{instance.address}),
-		)
+		servers[i] = startTestServer(t, WithDomain(instance.domain), withTestZone(t, fmt.Sprintf("marker TXT %q\n", instance.marker)))
 	}
 
 	for i, instance := range instances {
-		t.Run(instance.domain+" answers for its own name server", func(t *testing.T) {
-			resp := queryTestServer(t, servers[i], "ns1."+instance.domain+".", dns.TypeA)
-			want := rrStrings(t, "ns1."+instance.domain+". 3600 IN A "+instance.address)
+		t.Run(instance.domain+" answers from its own zone file", func(t *testing.T) {
+			resp := queryTestServer(t, servers[i], "marker."+instance.domain+".", dns.TypeTXT)
+			want := rrStrings(t, fmt.Sprintf("marker.%s. 300 IN TXT %q", instance.domain, instance.marker))
 			if resp.Rcode != dns.RcodeSuccess || !slices.Equal(stringsOf(resp.Answer), want) {
 				t.Errorf("want NOERROR and %q, received:\n%s", want, resp)
 			}
@@ -151,11 +140,7 @@ func TestInstanceIsolation(t *testing.T) {
 
 func newServeTestXip(t *testing.T, domain string, opts ...Option) *Xip {
 	t.Helper()
-	xip, err := NewXip(append([]Option{
-		WithDomain(domain),
-		WithEmail("admin@" + domain),
-		WithNameServers([]string{"192.0.2.10"}),
-	}, opts...)...)
+	xip, err := NewXip(append([]Option{WithDomain(domain), withTestZone(t, "")}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,54 +231,33 @@ func TestServeReportsReadLoopError(t *testing.T) {
 func TestTwoInstancesSameZone(t *testing.T) {
 	const domain = "same-zone.test"
 	addresses := map[string]string{}
-	for _, ns := range []string{"192.0.2.1", "192.0.2.2"} {
-		addresses[ns] = startTestServer(t,
-			WithDomain(domain),
-			WithEmail("admin@"+domain),
-			WithNameServers([]string{ns}),
-		)
+	for _, www := range []string{"192.0.2.1", "192.0.2.2"} {
+		addresses[www] = startTestServer(t, WithDomain(domain), withTestZone(t, "www A "+www+"\n"))
 	}
 
-	for ns, address := range addresses {
-		resp := queryTestServer(t, address, "ns1."+domain+".", dns.TypeA)
+	for www, address := range addresses {
+		resp := queryTestServer(t, address, "www."+domain+".", dns.TypeA)
 		if len(resp.Answer) != 1 {
-			t.Errorf("server with %s: got %d answers, want 1:\n%s", ns, len(resp.Answer), resp)
+			t.Errorf("server with %s: got %d answers, want 1:\n%s", www, len(resp.Answer), resp)
 			continue
 		}
-		if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.String() != ns {
-			t.Errorf("server with %s answered %q, want its own address", ns, resp.Answer[0])
+		if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.String() != www {
+			t.Errorf("server with %s answered %q, want the address of its own zone file", www, resp.Answer[0])
 		}
 	}
 }
 
 func TestNewXipValidation(t *testing.T) {
-	valid := []Option{
-		WithDomain("validation.test"),
-		WithEmail("admin@validation.test"),
-		WithNameServers([]string{"192.0.2.10"}),
-	}
-	with := func(opts ...Option) []Option {
-		return append(slices.Clone(valid), opts...)
-	}
-
+	zone := withTestZone(t, "")
 	tests := []struct {
 		name    string
 		opts    []Option
 		wantErr string
 	}{
-		{name: "no domain", opts: []Option{WithEmail("admin@validation.test"), WithNameServers([]string{"192.0.2.10"})}, wantErr: `xip: invalid domain "": empty`},
-		{name: "invalid domain", opts: with(WithDomain("a..b")), wantErr: `xip: invalid domain "a..b": empty label`},
-		{name: "domain that is an address", opts: with(WithDomain("192.0.2.1")), wantErr: `xip: invalid domain "192.0.2.1": an IP address`},
-		{name: "no email", opts: []Option{WithDomain("validation.test"), WithNameServers([]string{"192.0.2.10"})}, wantErr: `xip: email "" is not a bare address`},
-		{name: "email that is not an address", opts: with(WithEmail("admin")), wantErr: `xip: email "admin" is not a bare address`},
-		{name: "email with a display name", opts: with(WithEmail("Admin <admin@validation.test>")), wantErr: `xip: email "Admin <admin@validation.test>" is not a bare address`},
-		{name: "email in angle brackets", opts: with(WithEmail("<admin@validation.test>")), wantErr: `xip: email "<admin@validation.test>" is not a bare address`},
-		{name: "no name server", opts: []Option{WithDomain("validation.test"), WithEmail("admin@validation.test")}, wantErr: "xip: at least one name server is required"},
-		{name: "empty name server list", opts: with(WithNameServers(nil)), wantErr: "xip: at least one name server is required"},
-		{name: "IPv6 name server", opts: with(WithNameServers([]string{"192.0.2.10", "2001:db8::1"})), wantErr: `xip: name server "2001:db8::1" is not an IPv4 address`},
-		{name: "IPv4-mapped IPv6 name server", opts: with(WithNameServers([]string{"::ffff:192.0.2.10"})), wantErr: `xip: name server "::ffff:192.0.2.10" is not an IPv4 address`},
-		{name: "name server that is a host name", opts: with(WithNameServers([]string{"ns.example.test"})), wantErr: `xip: name server "ns.example.test" is not an IPv4 address`},
-		{name: "empty name server", opts: with(WithNameServers([]string{""})), wantErr: `xip: name server "" is not an IPv4 address`},
+		{name: "no domain", opts: []Option{zone}, wantErr: `xip: invalid domain "": empty`},
+		{name: "invalid domain", opts: []Option{WithDomain("a..b"), zone}, wantErr: `xip: invalid domain "a..b": empty label`},
+		{name: "domain that is an address", opts: []Option{WithDomain("192.0.2.1"), zone}, wantErr: `xip: invalid domain "192.0.2.1": an IP address`},
+		{name: "no zone file", opts: []Option{WithDomain("validation.test")}, wantErr: "xip: a zone file is required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -308,11 +272,7 @@ func TestNewXipValidation(t *testing.T) {
 	}
 
 	t.Run("domain in canonical form", func(t *testing.T) {
-		xip, err := NewXip(
-			WithDomain("Example.COM."),
-			WithEmail("admin@example.com"),
-			WithNameServers([]string{"192.0.2.10"}),
-		)
+		xip, err := NewXip(WithDomain("Example.COM."), zone)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -332,7 +292,7 @@ func TestNewXipValidation(t *testing.T) {
 			t.Errorf("answer = %q, want ns1.example.com. A 192.0.2.10", resp.Answer[0])
 		}
 		ns := queryTestServer(t, address, "example.com.", dns.TypeNS)
-		want := rrStrings(t, "example.com. 3600 IN NS ns1.example.com.")
+		want := rrStrings(t, "example.com. 3600 IN NS ns1.example.com.", "example.com. 3600 IN NS ns2.example.com.")
 		if !slices.Equal(stringsOf(ns.Answer), want) {
 			t.Errorf("NS answer = %q, want %q", stringsOf(ns.Answer), want)
 		}

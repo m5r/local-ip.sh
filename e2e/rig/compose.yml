@@ -20,7 +20,6 @@ services:
         environment:
             XIP_DOMAIN: local-ip.test
             XIP_EMAIL: admin@local-ip.test
-            XIP_NAMESERVERS: 10.253.53.53
             XIP_ZONE_FILE: /etc/local-ip.zone
             XIP_ACME_DIRECTORY: https://pebble:14000/dir
             # Pebble picks one of its profiles at random for an order that names none.

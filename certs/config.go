@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/url"
 	"time"
 
@@ -57,13 +58,18 @@ type Certificate struct {
 	KeyPEM []byte
 }
 
-// checkConfig returns an error for a configuration that can never work, and otherwise cfg with Domain in canonical form and a zero ValidationDelay replaced by DefaultValidationDelay. Applying it to its own result changes nothing. newStore and newACMEAuthority expect a configuration that went through it.
+// checkConfig returns an error for a configuration that can never work, an email that is not a bare address among them, and otherwise cfg with Domain in canonical form and a zero ValidationDelay replaced by DefaultValidationDelay. Applying it to its own result changes nothing. newStore and newACMEAuthority expect a configuration that went through it.
 func checkConfig(cfg Config) (Config, error) {
 	domain, err := names.Canonical(cfg.Domain)
 	if err != nil {
 		return Config{}, fmt.Errorf("certs: %w", err)
 	}
 	cfg.Domain = domain
+	if cfg.Email != "" {
+		if address, err := mail.ParseAddress(cfg.Email); err != nil || address.Address != cfg.Email {
+			return Config{}, fmt.Errorf("certs: email %q is not a bare address", cfg.Email)
+		}
+	}
 	if _, err := authorityDirName(cfg.DirectoryURL); err != nil {
 		return Config{}, fmt.Errorf("certs: %w", err)
 	}
