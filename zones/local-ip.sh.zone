@@ -1,7 +1,7 @@
 ; Zone file of the production instance, origin local-ip.sh.
 ; The default TTL is stated so that the TTL written on one record does not become the default of the records after it.
 $TTL 300
-@                   3600  SOA    ns1 admin 2024072600 900 900 1800 3600
+@                   3600  SOA    ns1 admin 2026112301 900 900 1800 3600
 @                   3600  NS     ns1
 @                   3600  NS     ns2
 ; 137.66.40.11 and 137.66.40.12 are the fly.io edge-only addresses of the app, see https://community.fly.io/t/custom-domains-certificate-is-stuck-on-awaiting-configuration/8329

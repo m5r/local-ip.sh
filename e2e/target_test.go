@@ -451,12 +451,12 @@ func TestLoadProductionConfig(t *testing.T) {
 	if !tg.publiclyDelegated {
 		t.Error("publiclyDelegated = false, want true")
 	}
-	assertRecords(t, "SOA", []dns.RR{tg.soa}, []string{`local-ip.sh. 3600 IN SOA ns1.local-ip.sh. admin.local-ip.sh. 2024072600 900 900 1800 3600`})
+	assertRecords(t, "SOA", []dns.RR{tg.soa}, []string{`local-ip.sh. 3600 IN SOA ns1.local-ip.sh. admin.local-ip.sh. 2026112301 900 900 1800 3600`})
 	assertRecords(t, "apex NS", tg.apexNS.records, []string{`local-ip.sh. 3600 IN NS ns1.local-ip.sh.`, `local-ip.sh. 3600 IN NS ns2.local-ip.sh.`})
 	assertRecords(t, "apex NS additional", tg.apexNSAdditional, []string{`ns1.local-ip.sh. 3600 IN A 137.66.40.11`, `ns2.local-ip.sh. 3600 IN A 137.66.40.12`})
 	assertDelegations(t, tg.delegations, nil)
 	assertRecordSets(t, tg.recordSets, [][]string{
-		{`local-ip.sh. 3600 IN SOA ns1.local-ip.sh. admin.local-ip.sh. 2024072600 900 900 1800 3600`},
+		{`local-ip.sh. 3600 IN SOA ns1.local-ip.sh. admin.local-ip.sh. 2026112301 900 900 1800 3600`},
 		{`ns1.local-ip.sh. 3600 IN A 137.66.40.11`},
 		{`ns2.local-ip.sh. 3600 IN A 137.66.40.12`},
 		{`local-ip.sh. 3600 IN A 137.66.40.11`, `local-ip.sh. 3600 IN A 137.66.40.12`},
